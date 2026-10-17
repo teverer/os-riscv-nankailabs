@@ -31,6 +31,7 @@ const struct pmm_manager *pmm_manager;
 
 
 static void check_alloc_page(void);
+static void page_init(void);
 
 // init_pmm_manager - initialize a pmm_manager instance
 static void init_pmm_manager(void) {
@@ -61,7 +62,59 @@ size_t nr_free_pages(void) {
     return pmm_manager->nr_free_pages();
 }
 
-//lab2 function1 YOUR CODE
+//lab2 function1
+static void page_init(void) {
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
+    if (mem_base == 0 || mem_size == 0) {
+        panic("page_init: invalid physical memory information from DTB");
+    }
+
+    uint64_t mem_end = mem_base + mem_size;
+
+    // The kernel is linked at KERNBASE and mapped with this fixed offset.
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    // Upper bound (exclusive) of the manageable physical page numbers.
+    npage = PPN(mem_end);
+    if (npage <= nbase) {
+        panic("page_init: physical memory ends below DRAM base");
+    }
+
+    // The page descriptor array starts right after the kernel image and is
+    // page aligned. Its virtual address is in the kernel mapping.
+    extern char end[];
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+
+    // Physical range occupied by the descriptor array: one descriptor for
+    // every page in [nbase, npage).
+    uintptr_t pages_pa = PADDR((uintptr_t)pages);
+    uintptr_t pages_end_pa =
+        pages_pa + (npage - nbase) * sizeof(struct Page);
+
+    // Reserve every page first, so that the kernel image, the descriptor
+    // array and the unaligned tail can never be handed to the allocator.
+    struct Page *p;
+    for (p = pages; p != pages + (npage - nbase); p++) {
+        p->flags = 0;
+        SetPageReserved(p);
+    }
+
+    cprintf("Physical memory: base = 0x%016lx, size = 0x%016lx\n",
+            mem_base, mem_size);
+    cprintf("  pages = %p, npage = 0x%lx, nbase = 0x%lx\n",
+            pages, (unsigned long)npage, (unsigned long)nbase);
+
+    // Free the complete pages after the descriptor array. Both bounds are
+    // page aligned: the start rounds up, the DTB-reported end rounds down.
+    uintptr_t free_start = ROUNDUP(pages_end_pa, PGSIZE);
+    uintptr_t free_end = ROUNDDOWN(mem_end, PGSIZE);
+
+    // Only call init_memmap() when there is at least one complete free page.
+    if (free_start < free_end) {
+        init_memmap(pa2page(free_start), (free_end - free_start) / PGSIZE);
+    }
+}
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
