@@ -1,6 +1,8 @@
 #include <console.h>
 #include <defs.h>
 #include <pmm.h>
+#include <slub.h>
+#include <slub_check.h>
 #include <stdio.h>
 #include <string.h>
 #include <dtb.h>
@@ -38,6 +40,8 @@ int kern_init(void) {
 
     // grade_backtrace();
     pmm_init();  // init physical memory management
+    slub_init(); // init SLUB object allocator after the page allocator
+    check_slub(); // black-box tests for the SLUB allocator
 
     /* do nothing */
     while (1)
