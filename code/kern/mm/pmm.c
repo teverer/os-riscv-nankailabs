@@ -70,7 +70,7 @@ size_t nr_free_pages(void) {
     return pmm_manager->nr_free_pages();
 }
 
-//lab2 function1
+//lab2 function1 2411353
 static void page_init(void) {
     uint64_t mem_base = get_memory_base();
     uint64_t mem_size = get_memory_size();
