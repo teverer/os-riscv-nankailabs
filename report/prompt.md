@@ -190,50 +190,71 @@ static void buddy_check(void);
 
 ### 3.4 SLUB（邵毅）
 
-实现 prompt（第一轮）：
+实现 prompt：
 
 ```text
-为一个小型 RISC-V 教学内核（uCore 风格）从零实现一个 SLUB 风格的内存对象分配模块。内核已具备第一层按页分配的物理内存管理，请先自行阅读其中的代码和可用工具（页分配接口、断言、打印、Page 结构等），在 kern/mm/ 下新增 slub.h / slub.c，实现第二层：基于 SLUB 主体思想的任意大小对象分配，并提供 kmalloc(size) / kfree(ptr) 两层接口；释放时只传对象指针，不允许调用方提供额外信息。初始化接口在我完成页分配初始化之后调用，请给出确切的调用语句。
+[PROMPT]
 
-【必须体现的 SLUB 语义（每条都可验证）】
-1. 对象按大小向上归并到有限个大小等级，同等级对象来自同一种缓存，等级划分方案写明；
-2. slab 向第一层申请整页（如每 slab 一页），页内切分成多个对象；
-3. 空闲对象内嵌 freelist（对象空间里直接存下一个空闲对象信息）；
-4. 分配优先取当前/部分占用 slab 的空闲对象，不够时才向页层申请新页；
-5. slab 全空时归还页层，保证对象全释放后系统占用的页数恢复到初始值（无泄漏）；
-6. kfree 能可靠定位对象所属 slab 与缓存；
-7. 非法指针与双重释放必须能检出（assert/panic）；
-8. 缓存元数据内存不允许"元数据又请求元数据"的递归。
-错误语义（如 size==0、超过单页）明确声明并保持一致。
+新建 code/kern/mm/slub.h 和 slub.c，在页分配器之上实现 SLUB 风格的第二层对象分配，提供 kmalloc(size) / kfree(ptr)（后者只传对象指针）。必须修改实际文件，只新增这两个文件和入口一行调用 slub_init();（位于 pmm_init(); 之后）；单核不加锁，不实现 per-CPU、RCU、复杂 partial 排序。大小等级、对齐与错误语义写入 slub.h 注释并与实现一致；make 通过，QEMU 启动初始化无 panic。
 
-【边界】
-不实现 Linux SLUB 的 per-CPU、RCU、复杂 partial 排序等，只要体现主体思想；不修改既有代码的现有语义；单核无并发，不需要加锁；不要求性能与时空复杂度。
+[RELY]
 
-【交付与验收】
-kern/mm/slub.h、slub.c 完整代码 + 简要说明（大小等级、freelist 组织、kfree 定位方法、slab 归还时机）。代码放入 code/kern/mm/ 后 make 通过，QEMU 启动运行初始化无 panic。
+  类别   	关键内容                                    
+  宏    	PGSIZE、PGSHIFT、PPN()、KERNBASE、KERNTOP、ROUNDUP()、ROUNDDOWN()
+  结构   	struct Page（ref、flags、property、page_link）、list_entry_t
+  页层接口 	alloc_page()、free_page()、nr_free_pages()
+  地址关系 	DRAM 直映射到 [KERNBASE, KERNTOP)，VA = PA + va_pa_offset；page2pa()、pa2page()、PADDR()、pages、nbase、va_pa_offset
+  调试/顺序	assert()、panic()（不返回）、cprintf()；先 pmm_init() 后 slub_init()
+
+[GUARANTEE]
+
+    void slub_init(void);
+    void *kmalloc(size_t size);
+    void kfree(void *ptr);
+
+可添加 static 辅助函数与静态变量（如缓存表），不得改变公开接口。
+
+[SPECIFICATION]
+
+slub_init：首次调用建立各等级缓存，重复调用直接返回；不申请页，nr_free_pages() 不变；元数据必须静态获得，禁止用对象分配器申请元数据（无递归）。
+
+kmalloc：未初始化则 panic。size==0 或超单页返回 NULL；优先从部分占用 slab 分配（不申请新页），其无空闲对象时才向页层申请一个整页作新 slab，页层耗尽返回 NULL。每 slab 恰好一页，freelist 指针存于空闲对象自身空间；返回指针满足等级对齐、空间不小于请求、与存活对象不重叠。
+
+kfree：只传指针，由指针自行定位 slab/cache。合法对象回到其 slab 空闲链表；slab 全空则当次归还整页且不保留（全部释放后 nr_free_pages() 恢复原值），归还前清除页描述符上的本模块状态。以下 panic：ptr==NULL、不在 [KERNBASE, KERNTOP)、页非 slab、偏移非对象边界、元数据非法、双重释放。
 ```
 
-测试 prompt（第二轮）：
+测试 prompt：
 
 ```text
-我已得到 SLUB 风格对象分配模块（kern/mm/ 下 slub.h 提供 kmalloc/kfree，kfree 只传指针），先阅读该头文件确认实际接口签名，然后为其设计测试函数，接入内核单独运行。
+[PROMPT]
 
-【约束】
-- 测试放在新文件（建议 kern/mm/slub_check.c），提供统一入口 check_slub()，由我在对象分配器初始化之后调用；
-- 只允许通过 kmalloc/kfree 和页分配器可查询接口做黑盒测试，禁止读写待测实现的内部数据结构，禁止修改 slub.c/slub.h；
-- 每个检查点断言失败即停，通过时打印"检查项 + 通过"，最后打印总结；控制测试资源用量，避免耗尽内存。
+先读 slub.h 确认接口与已声明语义，新建 code/kern/mm/slub_check.c（可配 slub_check.h），实现统一入口 check_slub()，在 slub_init(); 之后调用。禁止修改 slub.c/slub.h，禁止读写分配器内部结构（缓存表、partial 链表、freelist、struct Page 字段），只用 kmalloc/kfree 与页分配器查询接口黑盒测试；断言失败即停机，控制资源用量避免耗尽内存。每项通过打印"检查项 + PASS"，最后打印总结；合法路径不 panic，非法使用必须 panic 且作为独立最小运行阶段；make 通过，QEMU 自动运行全部检查通过。
 
-【必须覆盖的检查（每项注明拦截哪类回归）】
-1. 分配有效性：覆盖 1 字节、小对象、中对象、接近对象最大尺寸，逐个分配、对整个对象写满线性模式后读回比对；
-2. 不重叠与对齐：同时持有多个不同尺寸对象，交叉写 A 读 B 验证互不踩踏；多次分配地址满足实现声明对齐规则；
-3. 释放复用：分配 A → kfree(A) → 再分配同大小，验证其地址被回收复用；
-4. slab 增长：一种小尺寸循环分配数量远超单页对象容量（中途穿插释放若干），全部对象存活且内容正确；
-5. slab 收缩无泄漏：全部 kfree 后系统空闲页数恢复到序列开始前的值（若实现声明有保留结构，断言差异不超过其声明值）；
-6. 交错分配/释放：分批释放部分对象后继续分配，验证存活对象内容不被破坏，未存活空间不被错误复用；
-7. 非法使用：kfree 同一地址两次、kfree 栈上/NULL 指针，必须触发断言/panic（可单独一个最小运行阶段做）；
-8. 固定种子随机压力：多种尺寸间随机 kmalloc/kfree 至数百个存活对象，随机抽验存活对象内容，结束全部释放并校验页数恢复。
-若实现声明的边界语义与常规不同（如 size==0），按其声明验证一致性并记录在注释中。
+[RELY]
 
-【验收】
-代码放入 code/kern/mm/ 后 make 通过；QEMU 中自动运行，全部检查通过打印总结。
+- 被测接口：slub_init(void)、kmalloc(size_t size)、kfree(void *ptr)，以 slub.h 实际声明为准。
+- 已声明语义（须按此验证）：等级 8..4096 共 10 级、向上归并、同级共用缓存、按等级对齐；kmalloc(0)、超单页、页层耗尽返回 NULL；未初始化即用、kfree(NULL)、非法/非边界/双重释放 panic；不保留空 slab，测试前后空闲页数应一致。
+- 可用接口与资源：nr_free_pages()、PGSIZE、assert()、panic()、cprintf()；128 MiB DRAM 空闲页约 3.2 万，随机阶段存活对象至多数百个。
+
+[GUARANTEE]
+
+    void check_slub(void);
+    void check_slub_bad_use(int which);
+
+后者为非法使用的独立 panic 阶段（which 取 0..3，每 case 单独启动一次）。可添加 static 辅助函数、测试静态数组、模式校验函数、固定种子随机生成器。
+
+[SPECIFICATION]
+
+check_slub：入口记录 nr_free_pages() 基准，全部通过后对象全部释放、页数与基准一致并打印总结；任一失败立即 panic。
+
+  检查          	方法                                      
+  1 分配有效性     	1B/小/中/近最大尺寸逐个分配，写满模式读回；验证 size==0 与超单页返回 NULL
+  2 不重叠与对齐    	多种尺寸对象交叉读写，地址满足等级对齐                     
+  3 释放复用      	分配 A、邻居 B → 释放 A → 再分配须复用 A，B 不破坏       
+  4 slab 增长   	分配远超单页容量（如 640 个），中途穿插释放再补，全部存活且内容正确    
+  5 slab 收缩无泄漏	多尺寸对象全部释放，nr_free_pages() 精确恢复          
+  6 交错分配/释放   	分批释放部分后继续分配，存活对象不破坏、释放空间可复用             
+  8 随机压力      	固定种子多尺寸交替数百次分配/释放，随机抽验，结束全部释放并校验页数      
+
+check_slub_bad_use：必须由被测实现 panic 且不返回，若返回则测试自行 panic 报"非法操作未被检测"。case 0 同地址连续释放两次（双重释放）；case 1 释放栈上地址（非 slab 页）；case 2 kfree(NULL)；case 3 释放对象内部 +1 指针（非对象边界）。
 ```
