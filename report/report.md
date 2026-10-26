@@ -337,15 +337,9 @@ if (le != &free_list) {
 - **后邻合并**：若 `base + base->property == p`，说明 `base` 的末尾正好接上后一个块 `p`，把 `p` 并入 `base`，并摘除 `p` 的链表节点。
 - 因为链表有序、且相邻空闲块已经合并，所以只需检查前、后各一个块。
 
-**（4）复杂度**
-
-- 分配：线性扫描空闲链表 O(m)，拆分 O(1)；
-- 回收：按地址插入 O(m)，前后合并 O(1)；
-- 其中 m 为空闲块的数量。
-
 #### 2. 问题解答：原有的 First-Fit 算法是否有改进空间？
 
-有，较直接的改进方向有以下三点：
+有，改进方向有以下两点：
 
 1. **缩短查找范围**：分配时从链表头逐个比较，空闲块较多时效率不高。可以按块的大小分组，把大小相近的块放在同一条链表中，查找时先进入合适的大小组；也可以把空闲块组织成按大小排序的平衡树，直接定位到合适的块。这样能减少需要比较的块数。
 2. **避免总是使用低地址**：First-Fit 每次都从最低地址开始找，低地址区域容易被切碎。可以记住上一次分配的位置，下次从该位置之后继续查找（Next-Fit），使空闲块的使用更均匀。
@@ -396,7 +390,7 @@ list_add_before / list_del / list_next；pages、npage、nbase
 // 测试函数直接用 free_list、nr_free，须在本文件自行提供
 
 [GUARANTEE]
-```c
+​```c
 static void best_fit_init(void);
 static void best_fit_init_memmap(struct Page *base, size_t n);
 static struct Page *best_fit_alloc_pages(size_t n);
@@ -442,7 +436,7 @@ const struct pmm_manager best_fit_pmm_manager;
 
 **需要实现/修改的函数：**
 
-```c
+​```c
 static void buddy_init(void);
 static void buddy_init_memmap(struct Page *base, size_t n);
 static struct Page *buddy_alloc_pages(size_t n);
@@ -490,8 +484,6 @@ static struct Page *buddy_find_covering(struct Page *target);
 
 #### 最终提示词
 
-王治中提供的实现 prompt：
-
 ````text
 [PROMPT]
 **任务**：从零生成伙伴系统分配模块，实现 2 的幂分块、分裂与伙伴合并并定义 buddy_pmm_manager；在 pmm.c 的 init_pmm_manager() 选它。
@@ -507,7 +499,7 @@ PG_property；struct Page；free_area_t
 list_add_before / list_del / list_next；pages、nbase；alloc_pages
 
 [GUARANTEE]
-```c
+​```c
 static void buddy_init(void);
 static void buddy_init_memmap(struct Page *base, size_t n);
 static struct Page *buddy_alloc_pages(size_t n);
@@ -530,7 +522,7 @@ const struct pmm_manager buddy_pmm_manager;
 
 王治中提供的测试 prompt：
 
-````text
+​````text
 [PROMPT]
 **任务**：在伙伴系统模块的实现文件内写测试，入口 buddy_check
 
@@ -545,7 +537,7 @@ const struct pmm_manager buddy_pmm_manager;
 alloc_pages / free_pages / nr_free_pages；assert；cprintf
 
 [GUARANTEE]
-```c
+​```c
 static void buddy_check(void);
 ```
 
@@ -616,7 +608,7 @@ static void buddy_check(void);
 
 SLUB 采用两层结构：第一层仍以页为粒度管理物理内存（`alloc_page()` / `free_page()`），第二层把整页组织成 slab，再按固定步长切成对象，供上层按对象申请和释放。对象大小向上归并到 10 个 2 的幂等级（8、16、32、64、128、256、512、1024、2048、4096 字节），每个等级对应一个 `kmem_cache`，记录对象大小、每页对象数、partial slab 链表和活跃 slab 数：
 
-```c
+​```c
 struct kmem_cache {
     size_t size;          /* 对象大小：8, 16, ..., 4096 字节 */
     size_t objs_per_slab; /* 每页可切分的对象数 */
