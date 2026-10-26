@@ -390,7 +390,7 @@ list_add_before / list_del / list_next；pages、npage、nbase
 // 测试函数直接用 free_list、nr_free，须在本文件自行提供
 
 [GUARANTEE]
-​```c
+```c
 static void best_fit_init(void);
 static void best_fit_init_memmap(struct Page *base, size_t n);
 static struct Page *best_fit_alloc_pages(size_t n);
@@ -436,7 +436,7 @@ const struct pmm_manager best_fit_pmm_manager;
 
 **需要实现/修改的函数：**
 
-​```c
+```c
 static void buddy_init(void);
 static void buddy_init_memmap(struct Page *base, size_t n);
 static struct Page *buddy_alloc_pages(size_t n);
@@ -484,6 +484,8 @@ static struct Page *buddy_find_covering(struct Page *target);
 
 #### 最终提示词
 
+生成 buddy system 的 prompt：
+
 ````text
 [PROMPT]
 **任务**：从零生成伙伴系统分配模块，实现 2 的幂分块、分裂与伙伴合并并定义 buddy_pmm_manager；在 pmm.c 的 init_pmm_manager() 选它。
@@ -499,7 +501,7 @@ PG_property；struct Page；free_area_t
 list_add_before / list_del / list_next；pages、nbase；alloc_pages
 
 [GUARANTEE]
-​```c
+```c
 static void buddy_init(void);
 static void buddy_init_memmap(struct Page *base, size_t n);
 static struct Page *buddy_alloc_pages(size_t n);
@@ -520,9 +522,9 @@ const struct pmm_manager buddy_pmm_manager;
 **Post-Condition**: 逐级与同阶伙伴合并，摘链时扣减总空闲页数并清旧块头标志。
 ````
 
-王治中提供的测试 prompt：
+测试 prompt：
 
-​````text
+````text
 [PROMPT]
 **任务**：在伙伴系统模块的实现文件内写测试，入口 buddy_check
 
@@ -537,7 +539,7 @@ const struct pmm_manager buddy_pmm_manager;
 alloc_pages / free_pages / nr_free_pages；assert；cprintf
 
 [GUARANTEE]
-​```c
+```c
 static void buddy_check(void);
 ```
 
@@ -608,7 +610,7 @@ static void buddy_check(void);
 
 SLUB 采用两层结构：第一层仍以页为粒度管理物理内存（`alloc_page()` / `free_page()`），第二层把整页组织成 slab，再按固定步长切成对象，供上层按对象申请和释放。对象大小向上归并到 10 个 2 的幂等级（8、16、32、64、128、256、512、1024、2048、4096 字节），每个等级对应一个 `kmem_cache`，记录对象大小、每页对象数、partial slab 链表和活跃 slab 数：
 
-​```c
+```c
 struct kmem_cache {
     size_t size;          /* 对象大小：8, 16, ..., 4096 字节 */
     size_t objs_per_slab; /* 每页可切分的对象数 */
@@ -889,8 +891,6 @@ check_alloc_page() succeeded!
 `make qemu` 启动后 Buddy 自检通过，截图中可以看到 `[Buddy] Case 1/2/3 PASS` 和 `check_alloc_page() succeeded!`：
 
 ![模块二任务三 make qemu](images/2.3_buddy_qemu.png)
-
-> 备注：当前仓库 `init_pmm_manager()` 使用 `buddy_pmm_manager`；如果最终按 `[Test 2] Best-Fit` 验收，提交前需要和王治中确认是否切回 `best_fit_pmm_manager`。
 
 ### SLUB（选做）
 
