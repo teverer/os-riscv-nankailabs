@@ -1,6 +1,5 @@
 #include <default_pmm.h>
 #include <best_fit_pmm.h>
-#include <buddy_pmm.h>
 #include <defs.h>
 #include <error.h>
 #include <memlayout.h>
@@ -9,6 +8,7 @@
 #include <sbi.h>
 #include <stdio.h>
 #include <string.h>
+#include <../sync/sync.h>
 #include <riscv.h>
 #include <dtb.h>
 
@@ -32,21 +32,13 @@ const struct pmm_manager *pmm_manager;
 
 
 static void check_alloc_page(void);
-static void page_init(void);
 
 // init_pmm_manager - initialize a pmm_manager instance
 static void init_pmm_manager(void) {
-    pmm_manager = &buddy_pmm_manager;
+    pmm_manager = &default_pmm_manager;
     cprintf("memory management: %s\n", pmm_manager->name);
     pmm_manager->init();
 }
-
-// 模块二任务二（Best-Fit）阶段的 init_pmm_manager()
-// static void init_pmm_manager(void) {
-//     pmm_manager = &best_fit_pmm_manager;
-//     cprintf("memory management: %s\n", pmm_manager->name);
-//     pmm_manager->init();
-// }
 
 // init_memmap - call pmm->init_memmap to build Page struct for free memory
 static void init_memmap(struct Page *base, size_t n) {
@@ -56,73 +48,40 @@ static void init_memmap(struct Page *base, size_t n) {
 // alloc_pages - call pmm->alloc_pages to allocate a continuous n*PAGESIZE
 // memory
 struct Page *alloc_pages(size_t n) {
-    return pmm_manager->alloc_pages(n);
+    struct Page *page = NULL;
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    {
+        page = pmm_manager->alloc_pages(n);
+    }
+    local_intr_restore(intr_flag);
+    return page;
 }
 
 // free_pages - call pmm->free_pages to free a continuous n*PAGESIZE memory
 void free_pages(struct Page *base, size_t n) {
-    pmm_manager->free_pages(base, n);
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    {
+        pmm_manager->free_pages(base, n);
+    }
+    local_intr_restore(intr_flag);
 }
 
 // nr_free_pages - call pmm->nr_free_pages to get the size (nr*PAGESIZE)
 // of current free memory
 size_t nr_free_pages(void) {
-    return pmm_manager->nr_free_pages();
+    size_t ret;
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    {
+        ret = pmm_manager->nr_free_pages();
+    }
+    local_intr_restore(intr_flag);
+    return ret;
 }
 
-//lab2 function1 2411353
-static void page_init(void) {
-    uint64_t mem_base = get_memory_base();
-    uint64_t mem_size = get_memory_size();
-    if (mem_base == 0 || mem_size == 0) {
-        panic("page_init: invalid physical memory information from DTB");
-    }
-
-    uint64_t mem_end = mem_base + mem_size;
-
-    // The kernel is linked at KERNBASE and mapped with this fixed offset.
-    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
-
-    // Upper bound (exclusive) of the manageable physical page numbers.
-    npage = PPN(mem_end);
-    if (npage <= nbase) {
-        panic("page_init: physical memory ends below DRAM base");
-    }
-
-    // The page descriptor array starts right after the kernel image and is
-    // page aligned. Its virtual address is in the kernel mapping.
-    extern char end[];
-    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
-
-    // Physical range occupied by the descriptor array: one descriptor for
-    // every page in [nbase, npage).
-    uintptr_t pages_pa = PADDR((uintptr_t)pages);
-    uintptr_t pages_end_pa =
-        pages_pa + (npage - nbase) * sizeof(struct Page);
-
-    // Reserve every page first, so that the kernel image, the descriptor
-    // array and the unaligned tail can never be handed to the allocator.
-    struct Page *p;
-    for (p = pages; p != pages + (npage - nbase); p++) {
-        p->flags = 0;
-        SetPageReserved(p);
-    }
-
-    cprintf("Physical memory: base = 0x%016lx, size = 0x%016lx\n",
-            mem_base, mem_size);
-    cprintf("  pages = %p, npage = 0x%lx, nbase = 0x%lx\n",
-            pages, (unsigned long)npage, (unsigned long)nbase);
-
-    // Free the complete pages after the descriptor array. Both bounds are
-    // page aligned: the start rounds up, the DTB-reported end rounds down.
-    uintptr_t free_start = ROUNDUP(pages_end_pa, PGSIZE);
-    uintptr_t free_end = ROUNDDOWN(mem_end, PGSIZE);
-
-    // Only call init_memmap() when there is at least one complete free page.
-    if (free_start < free_end) {
-        init_memmap(pa2page(free_start), (free_end - free_start) / PGSIZE);
-    }
-}
+//lab2 请补充你在lab2中的代码
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
