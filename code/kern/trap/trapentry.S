@@ -56,7 +56,55 @@
 
     .macro RESTORE_ALL
 
-    #lab3 function1 YOUR CODE
+    #lab3 function1 2411353
+    # restore the four CSRs saved in slots 32..35.
+    # s1-s4 are used as temporaries here; their original values are
+    # reloaded from the trapframe further below.
+    LOAD s1, 32*REGBYTES(sp)      # sstatus
+    LOAD s2, 33*REGBYTES(sp)      # sepc
+    LOAD s3, 34*REGBYTES(sp)      # sbadaddr
+    LOAD s4, 35*REGBYTES(sp)      # scause
+    csrw sstatus, s1
+    csrw sepc, s2
+    csrw sbadaddr, s3
+    csrw scause, s4
+
+    # restore the general-purpose registers except x2 (sp).
+    # x0 is hard-wired to zero, so it is skipped.
+    LOAD x1, 1*REGBYTES(sp)
+    LOAD x3, 3*REGBYTES(sp)
+    LOAD x4, 4*REGBYTES(sp)
+    LOAD x5, 5*REGBYTES(sp)
+    LOAD x6, 6*REGBYTES(sp)
+    LOAD x7, 7*REGBYTES(sp)
+    LOAD x8, 8*REGBYTES(sp)
+    LOAD x9, 9*REGBYTES(sp)
+    LOAD x10, 10*REGBYTES(sp)
+    LOAD x11, 11*REGBYTES(sp)
+    LOAD x12, 12*REGBYTES(sp)
+    LOAD x13, 13*REGBYTES(sp)
+    LOAD x14, 14*REGBYTES(sp)
+    LOAD x15, 15*REGBYTES(sp)
+    LOAD x16, 16*REGBYTES(sp)
+    LOAD x17, 17*REGBYTES(sp)
+    LOAD x18, 18*REGBYTES(sp)
+    LOAD x19, 19*REGBYTES(sp)
+    LOAD x20, 20*REGBYTES(sp)
+    LOAD x21, 21*REGBYTES(sp)
+    LOAD x22, 22*REGBYTES(sp)
+    LOAD x23, 23*REGBYTES(sp)
+    LOAD x24, 24*REGBYTES(sp)
+    LOAD x25, 25*REGBYTES(sp)
+    LOAD x26, 26*REGBYTES(sp)
+    LOAD x27, 27*REGBYTES(sp)
+    LOAD x28, 28*REGBYTES(sp)
+    LOAD x29, 29*REGBYTES(sp)
+    LOAD x30, 30*REGBYTES(sp)
+    LOAD x31, 31*REGBYTES(sp)
+
+    # restore sp last: every LOAD above still uses the old sp as base,
+    # and slot 2 holds the interrupted program's stack pointer.
+    LOAD x2, 2*REGBYTES(sp)
 
     .endm
 
@@ -65,7 +113,11 @@
 __alltraps:
     SAVE_ALL
 
-    #lab3 function1 YOUR CODE
+    #lab3 function1 2411353
+    # pass the trapframe at the top of the kernel stack as the first
+    # argument of trap(struct trapframe *tf)
+    mv a0, sp
+    jal trap
     # sp should be the same as before "jal trap"
 
     .globl __trapret
