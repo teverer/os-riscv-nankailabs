@@ -80,8 +80,87 @@ void print_regs(struct pushregs *gpr) {
     cprintf("  t6       0x%08x\n", gpr->t6);
 }
 
-//lab3 function2 YOUR CODE
+//lab3 function2 2412195
 
+/* interrupt_handler - handle interrupts according to scause */
+void interrupt_handler(struct trapframe *tf) {
+    /* Clear the interrupt bit (the most significant bit) of scause. */
+    uintptr_t cause = tf->cause & ~((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1));
+
+    switch (cause) {
+    case IRQ_U_SOFT:
+        cprintf("User software interrupt\n");
+        break;
+    case IRQ_S_SOFT:
+        cprintf("Supervisor software interrupt\n");
+        break;
+    case IRQ_H_SOFT:
+        cprintf("Hypervisor software interrupt\n");
+        break;
+    case IRQ_M_SOFT:
+        cprintf("Machine software interrupt\n");
+        break;
+    case IRQ_U_TIMER:
+        cprintf("User timer interrupt\n");
+        break;
+    case IRQ_S_TIMER:
+        /* Rearm the timer first so that the next tick is not lost. */
+        clock_set_next_event();
+        ticks++;
+        if (ticks % TICK_NUM == 0) {
+            print_ticks();
+        }
+        break;
+    case IRQ_H_TIMER:
+        cprintf("Hypervisor timer interrupt\n");
+        break;
+    case IRQ_M_TIMER:
+        cprintf("Machine timer interrupt\n");
+        break;
+    case IRQ_U_EXT:
+        cprintf("User external interrupt\n");
+        break;
+    case IRQ_S_EXT:
+        cprintf("Supervisor external interrupt\n");
+        break;
+    case IRQ_H_EXT:
+        cprintf("Hypervisor external interrupt\n");
+        break;
+    case IRQ_M_EXT:
+        cprintf("Machine external interrupt\n");
+        break;
+    default:
+        cprintf("Unknown interrupt: cause %d\n", (int)cause);
+        print_trapframe(tf);
+        break;
+    }
+}
+
+/* Return the length of the instruction that caused the exception. */
+static inline uintptr_t exception_instruction_length(uintptr_t epc) {
+    uint16_t insn = *(volatile uint16_t *)epc;
+    /* Bits [1:0] == 0b11 mark a 32-bit instruction; otherwise it is 16-bit. */
+    return (insn & 0x3) == 0x3 ? 4 : 2;
+}
+
+/* exception_handler - handle synchronous exceptions according to scause */
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+    case CAUSE_ILLEGAL_INSTRUCTION:
+        cprintf("Illegal instruction at 0x%08x\n", tf->epc);
+        /* Skip the faulting instruction so sret does not execute it again. */
+        tf->epc += exception_instruction_length(tf->epc);
+        break;
+    case CAUSE_BREAKPOINT:
+        cprintf("Breakpoint at 0x%08x\n", tf->epc);
+        /* Skip ebreak (2 bytes when compressed, 4 bytes otherwise). */
+        tf->epc += exception_instruction_length(tf->epc);
+        break;
+    default:
+        print_trapframe(tf);
+        break;
+    }
+}
 
 static inline void trap_dispatch(struct trapframe *tf) {
     if ((intptr_t)tf->cause < 0) {
