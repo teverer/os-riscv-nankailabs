@@ -4,43 +4,39 @@
 
 | 项目 | 内容 |
 |---|---|
-| **实验名称** | Lab 2：物理内存与页表 |
+| **实验名称** | Lab 3：中断与异常处理 |
 | **小组成员** | 2411353-李行阳、2412195-邵毅、2412352-王治中 |
-| **完成日期** | 2026-10-25 |
+| **完成日期** | 2026-11-08 |
 
 ### 小组分工
 
 | 成员 | 负责的练习/模块 |
 |---|---|
-| 2411353-李行阳 | 功能模块一及其challenge、分支任务、报告整合与提交 |
-| 2412195-邵毅 | 功能模块二challenge及报告中对应内容、合并代码 |
-| 2412352-王治中 | 功能模块二除challenge及报告中对应内容 |
+| 2411353-李行阳 | 功能模块一及报告中对应内容 |
+| 2412195-邵毅 | 功能模块二（异常）及报告中对应内容 |
+| 2412352-王治中 | 功能模块二（中断）及报告中对应内容 |
 
-实验报告分工上,各自完成自己相应负责内容并攥写可直接整合的对应报告内容,之后共同讨论攥写整体性的实验报告要求内容。
+实验报告分工上，各自完成自己负责的模块并撰写可直接整合的内容，之后共同讨论整体性要求。
 
 ---
 
 ## 一、实验目的
 
-实验 1 结束时，我们已经得到一个可以启动的最小内核：CPU 加电后经过 OpenSBI，跳转到内核入口，进入 C 语言入口 `kern_init`。但此时内核对物理内存还没有真正的管理能力：它还没有开启分页，只能直接访问物理地址，也不知道哪些物理页可用、如何建立描述符、如何把空闲页交给分配器。
-
-实验 2 主要涉及操作系统的物理内存管理。本实验在实验一的基础上，先发现系统中的物理内存，建立对物理内存的初步管理，再掌握页表相关操作，建立最简单的虚拟内存到物理内存的映射；最后通过分支任务观察 QEMU 如何模拟 TLB 查询和页表遍历。
+Lab 2 让内核能够管理物理内存，但内核还不能响应外部事件：时钟到来、程序断点、非法指令都只能让系统停住。本实验要补齐的，正是“内核被打断后如何保存现场、处理事件、再回到原处”的完整能力。
 
 本实验的主要目的是：
 
-1. 理解物理内存的管理方法：内核如何从 DTB 获得物理内存范围，如何用 `struct Page` 描述符管理物理页，如何把空闲页交给 `pmm_manager`；
-2. 理解页面分配算法：First-Fit、Best-Fit、Buddy System 以及 SLUB 的基本思想和差异；
-3. 理解页表的建立和使用方法：SV39 页表、`satp`、虚拟地址到物理地址的转换，以及 TLB 在其中的作用；
-4. 掌握用 GDB 观察 QEMU 地址翻译的方法，理解“软件模拟硬件”的过程；
-5. 练习用提示词/规格驱动 AI 完成代码，并记录 AI 协作中的问题和解决过程。
+1. 理解 RISC-V 的中断、异常与 trap 机制（特权级、CSR、委托、`sret`）。
+2. 掌握 Trap 上下文的保存与恢复，理解 `trapframe` 的布局和 `SAVE_ALL/RESTORE_ALL` 的对称关系。
+3. 掌握时钟中断、断点异常和非法指令异常的处理方法。
+4. 练习用提示词让 AI 生成汇编/C 代码，并用真实测试验证生成结果。
+5. 理解中断关闭/开启与临界区的基本思想。
 
 具体地，本实验需要完成：
 
-- 解析 DTB，获取物理内存的起始地址和大小；
-- 实现 `page_init()`，建立 `Page` 描述符数组，排除 OpenSBI、内核镜像和描述符数组，把完整空闲页注册给 `pmm_manager`；
-- 理解并实现 First-Fit / Best-Fit 等物理页分配算法，完成 Buddy System 任务和 SLUB 扩展任务（Challenge）；
-- 通过分支任务，用双 GDB 观察一次访存指令的 VA→PA 翻译；
-- 按报告要求记录 spec、prompt、AI 生成中的问题和解决过程。
+- 在 `kern/trap/trapentry.S` 中实现 `RESTORE_ALL`，并补全 `__alltraps` 的入口代码；
+- 在 `kern/trap/trap.c` 中实现 `interrupt_handler()` 与 `exception_handler()`；
+- 通过 `make grade` 的 Test 1/2/3，验证上下文恢复、异常返回和持续时钟中断。
 
 ---
 
@@ -48,7 +44,7 @@
 
 | 成员 | AI 编程工具 | 底层模型 | 备注 |
 |---|---|---|---|
-| 2411353-李行阳 | Claude Code（终端） | DeepSeek-V4.1-flash | qemu版本已由lab1的8.2.2变为4.1.1来进行实验 |
+| 2411353-李行阳 | Claude Code（终端） | DeepSeek-V4.1-flash | |
 | 2412195-邵毅 | DeepSeek Harness（Web UI） | DeepSeek-flash | |
 | 2412352-王治中 | DeepSeek Harness | DeepSeek-flash | |
 
@@ -63,943 +59,407 @@
 
 ### 3.1 本章节的逻辑主线
 
-Lab 1 结束时，内核已经能启动并按物理地址运行，但它对物理内存还没有管理能力：它不知道内存从哪里开始、有多大，也不知道哪些页已经被 OpenSBI 和内核自身占用。Lab 2 的主线，就是让内核先“知道”物理内存，再“管理”物理内存，最后通过调试理解 Lab 2 启动代码建立的虚拟地址映射。
+Lab 2 已经让内核能够管理物理内存，但内核仍然是一个“只会顺序执行”的程序：时钟到来、断点、非法指令这些事件发生时，系统没有统一的入口去接管。本实验要建立的就是这个入口，以及围绕它的“进入—处理—返回”闭环。
 
-**先要知道内存在哪里。** OpenSBI 在启动时扫描硬件，把物理内存的起点和大小写进 DTB；内核读取 DTB，得到后续管理所需的物理内存范围。没有这一步，后面的页描述符和分配器都无从谈起。
+整个实验围绕一条主线展开：**硬件在 trap 发生时把 PC 跳到 `stvec` 指向的入口，入口先把当前 CPU 现场保存成一个 `trapframe`，再按调用约定把 `trapframe` 交给 C 函数 `trap()`；`trap()` 根据 `scause` 把中断或异常分发给对应处理函数；处理完成后，入口代码从 `trapframe` 恢复现场，最后用 `sret` 回到被打断的指令。**
 
-**再要确定哪些页能用。** 内核为每个物理页建立一个页描述符，形成连续的描述符数组；先把 OpenSBI、内核镜像、描述符数组自身以及内存末尾不足一页的部分标为保留，只把剩下的完整页交给物理内存管理器。管理器把这些页组织成空闲页，之后分配和回收才有依据。
-
-**最后要理解虚拟地址如何落到物理页上。** Lab 2 的 entry.S 建立了最简单的启动页表并开启 Sv39；本实验不重新实现页表，而是通过分支任务，用双 GDB 观察 QEMU 如何查 TLB、TLB miss 后如何遍历页表，最终把虚拟地址翻译成物理地址。这一部分是对已有页表机制的观察，不是物理内存管理主线的下一步。
-
-因此，本章的逻辑主线可以概括为：先发现物理内存，再建立页描述符并划分保留区/空闲区，然后把空闲页交给分配器；分支任务作为一条观察线，帮助理解这些物理页如何通过页表被虚拟地址访问。
+因此，本章的逻辑可以概括为：**入口与上下文恢复（模块一）→ 中断/异常分类处理（模块二）→ 统一的返回路径**。模块一是所有 trap 的基础，模块二决定每一类 trap 具体做什么。
 
 ### 3.2 功能的逐步实现
 
-本章按照“发现物理内存 → 建立页描述符并划分保留/空闲 → 交给分配器 → 观察页表翻译”的顺序逐步实现：
+1. **配置 trap 入口**：`idt_init()` 把 `__alltraps` 的地址写入 `stvec`，并把 `sscratch` 清零。完成后，任何 trap 都会跳到 `__alltraps`。
+2. **保存现场**：`SAVE_ALL` 在栈上分配 36 个 8 字节槽位（共 288 字节）的 `trapframe`，保存 32 个通用寄存器和 `sstatus/sepc/sbadaddr/scause`。
+3. **实现入口与恢复（模块一）**：`__alltraps` 把 `sp` 作为参数传给 `trap()`；`RESTORE_ALL` 按相反顺序恢复现场。两者必须与 `SAVE_ALL` 的槽位布局严格对应。
+4. **分发处理**：`trap()` 调用 `trap_dispatch()`，根据 `scause` 最高位区分中断和异常，分别进入 `interrupt_handler()` 或 `exception_handler()`。
+5. **实现中断/异常处理（模块二）**：时钟中断重装下一次时钟并累计 `ticks`；断点和非法指令打印信息并推进 `epc`；未知类型用 `print_trapframe()` 兜底。
+6. **触发与验证**：`clock_init()` 设置第一个时钟事件，`intr_enable()` 打开 S 模式中断；随后系统持续收到时钟中断，`make grade` 用三个测试验证整条链路。
 
-1. 首先实现**物理内存探测** → 为什么首先实现这个？因为后续所有页描述符和分配都依赖物理内存的起点和大小；没有 DTB 提供的内存范围，内核无法知道要管理哪些页。
-2. 接着建立**页描述符并划分保留区/空闲区** → 为什么接着做这个？因为知道内存范围后，必须为每个物理页建立描述符，并把 OpenSBI、内核镜像、描述符数组自身和尾部碎页排除，否则分配器会把正在使用的内存分出去。
-3. 然后完成**空闲页注册和分配算法** → 为什么然后做这个？因为只有把完整空闲页交给 `pmm_manager`，`alloc_pages()` / `free_pages()` 才有可分配的资源；First-Fit、Best-Fit、Buddy System、SLUB 是不同分配策略。
+与 trap 直接相关的简化调用链（省略与 trap 无关的初始化）：
 
-这三步在代码中的调用关系是：`kern_init() → dtb_init() → pmm_init() → init_pmm_manager() → page_init() → init_memmap() → alloc_pages()/free_pages()`。
+```text
+kern_init()
+  → idt_init()                 // stvec = __alltraps
+  → clock_init()               // sie.STIE, 第一次时钟
+  → intr_enable()              // sstatus.SIE = 1
+  → 时钟中断
+  → __alltraps                 // SAVE_ALL
+  → trap(tf) → trap_dispatch(tf)
+  → interrupt_handler(tf) / exception_handler(tf)
+  → __trapret → RESTORE_ALL → sret
+```
 
-以上三步是物理内存管理的实现主线。除此之外，分支任务用双 GDB 观察 Lab 2 启动代码建立的 Sv39 页表的地址翻译：它不改变实现顺序，而是帮助理解虚拟地址如何通过 TLB 和页表落到物理页上，形成从物理内存管理到虚拟内存映射的完整认识。
+其中“入口与恢复”和“中断/异常处理”是两条实现主线；`idt_init`、`SAVE_ALL`、`trap_dispatch`、时钟初始化是框架已经提供的支撑，不需要学生修改。
 
 ---
 
 ## 四、实验内容与实现
 
-实验二主要涉及操作系统的物理内存管理。实验一已经得到一个可以启动的系统；本实验在此基础上，先发现系统中的物理内存，建立对物理内存的初步管理（连续物理内存管理），再掌握页表相关操作，建立最简单的虚拟内存到物理内存的映射；最后通过分支任务观察 QEMU 如何模拟 TLB 查询和页表遍历。
+本章的两个功能模块分别对应“进入 trap 前后如何保存/恢复现场”和“进入 C 之后如何处理中断/异常”。下面按模块说明功能、最终提示词和实现过程。
 
-本实验的内容可以分成三条主线：物理内存的发现与描述符布局、物理页分配算法，以及用 GDB 观察页表翻译。下面按功能模块和任务展开。
-
-### 功能模块：物理内存探测与页描述符初始化（page_init）
+### 功能模块一：Trap 上下文恢复与 Trap 入口
 
 **负责人：** 2411353-李行阳
 
 #### 模块功能描述
 
-**需要实现/修改的函数：**
+本模块涉及 `kern/trap/trapentry.S` 中的两处：
 
-```c
-static void page_init(void);
+```asm
+.macro RESTORE_ALL
+    ...
+.endm
+
+__alltraps:
+    SAVE_ALL
+    ...
 ```
 
-**功能说明：**
+- **`RESTORE_ALL`**（`trapentry.S:59-107`，宏声明在 57、`.endm` 在 109）：从当前栈上的 `trapframe` 恢复 31 个通用寄存器（`x0` 硬连线为 0，跳过）和 4 个 CSR（`sstatus`、`sepc`、`sbadaddr`、`scause`），最后恢复 `sp`。
+- **`__alltraps` 的入口代码**（`trapentry.S:116-120`）：在 `SAVE_ALL` 之后，把当前 `sp`（即 `trapframe` 基址）作为第一个参数放入 `a0`，调用 `trap(struct trapframe *tf)`；返回后顺序落入框架的 `__trapret`。
 
-`page_init()` 由 `pmm_init()` 调用，把 DTB 报告的物理内存变成可管理的页描述符布局：
+**作用：** 把“硬件保存的现场”转成 C 函数能读写的结构体，并在处理完成后把现场原样还回去。没有它，`trap()` 拿不到上下文，`sret` 也无法回到正确的执行状态。
 
-- 从 `get_memory_base()` / `get_memory_size()` 取内存范围，无效则 `panic()`；
-- 设置 `va_pa_offset = PHYSICAL_MEMORY_OFFSET`，`npage = PPN(mem_end)`；
-- `pages = ROUNDUP((uintptr_t)end, PGSIZE)`，描述符数组覆盖 `[nbase, npage)`；
-- 先把描述符全部置 reserved，排除 OpenSBI、内核镜像、描述符数组和尾部碎页；
-- 只把 `[ROUNDUP(PADDR(pages) + (npage - nbase) * sizeof(struct Page), PGSIZE), ROUNDDOWN(mem_end, PGSIZE))` 中的完整页交给 `init_memmap()`；
-- 没有完整空闲页时不调用 `init_memmap()`。
+**主要场景：** 时钟中断、断点异常、非法指令异常，以及所有需要从 S 模式 trap 返回的路径。
 
-核心状态和边界对应 `test_page_init()` 的 8 项检查：`va_pa_offset`、`npage`、`pages` 对齐/位置、空闲页数、内核尾页/数组页保留、`page2pa/pa2page` 往返。完整行为规格见下方 prompt。
+**与其他模块的交互：**
+
+- 与 `SAVE_ALL` 严格镜像：槽位 0～31 是 `x0`～`x31`，槽位 32～35 是四个 CSR；槽位 2 存的是“分配 trapframe 之前的 sp”。
+- 与 `trap()` 通过 RISC-V 调用约定交互：`a0` 是第一个参数，`jal trap` 写 `ra`，但原 `ra` 已保存在 `trapframe` 中，返回时由 `RESTORE_ALL` 恢复。
+- 与 `__trapret` 顺序衔接：`jal trap` 返回后没有跳转指令，控制流直接落到 `__trapret` 的 `RESTORE_ALL`。
+
+实现上最关键的三点是：
+
+1. **CSR 先恢复**：`csrw` 必须经由通用寄存器，而这时所有通用寄存器都还没恢复，正好借用 `s1～s4` 作为临时寄存器；它们的原值在槽位 9、18、19、20，后面会重新加载。
+2. **`x0` 跳过，`x2` 特殊**：`x0` 写入无效；`x2(sp)` 既是被恢复的值，又是访问 `trapframe` 的基址，必须最后恢复。
+3. **`sp` 最后恢复**：上面的所有 `LOAD` 都以旧 `sp` 为基址，提前恢复 `sp` 会让后续加载全部错位。
 
 #### 最终提示词
 
-本任务的 prompt 采用四段式：`[PROMPT]` 任务、`[RELY]` 可信上下文、`[GUARANTEE]` 接口清单、`[SPECIFICATION]` 行为规格。核心原则是“写需要满足什么，而不是按步骤写实现”；每一条要求都能对应到测试、断言或状态检查。
+本模块的 spec 是从框架已有的 `SAVE_ALL` 布局和 RISC-V 调用约定反推出来的：输入是 `sp` 指向的 36 槽 trapframe，输出是 31 个 GPR、4 个 CSR 和 `sp` 都恢复为保存值，约束是不假设任何寄存器进入前的值、`x2(sp)` 特殊处理、不得修改 `SAVE_ALL`/`trapframe`/`trap()` 签名。prompt 按四段式写：`[PROMPT]` 给任务，`[RELY]` 只给 `trapframe`/`SAVE_ALL`/`REGBYTES` 等最小上下文，`[GUARANTEE]` 固定可改与不可改的接口，`[SPECIFICATION]` 用 Pre/Post/Case/Requirements 把约束写成可验证条款。最终使用的提示词如下：
 
-完整 prompt 如下：
-
-````text
+```text
 [PROMPT]
-任务：直接修改工程文件，完成 lab2 功能模块一任务一：物理内存探测与页描述符初始化。
-目标文件：kern/mm/pmm.c。
-实现位置：标有 `//lab2 function1 YOUR CODE` 的位置。
-要求：
-- 必须实际修改项目文件，不要只在回答里展示代码；
-- 保留已有代码和注释，只补全 page_init；
-- 不得修改框架测试/断言函数、已有数据结构、宏、头文件接口和结构体；
-- 实现后必须能通过 check_alloc_page() 和官方 test_page_init() 的检查。
+在 ucore-riscv 的 lab3 中实现 Trap 入口与上下文恢复功能：
+1. 补全 kern/trap/trapentry.S 中的 RESTORE_ALL 宏；
+2. 补全 __alltraps 中 SAVE_ALL 之后、__trapret 之前的入口代码。
+直接修改源文件，给出完整实现，并说明如何用 make grade 的 Test 1 验证。
 
 [RELY]
-以下上下文均来自当前工程，不要改名或臆造：
-- PGSIZE = 4096，PPN(x) = (uintptr_t)(x) >> PGSHIFT；
-- struct Page 包含 ref、flags、property、page_link；
-- PHYSICAL_MEMORY_OFFSET = 0xFFFFFFFF40000000，DRAM_BASE = 0x80000000，nbase = DRAM_BASE / PGSIZE；
-- 全局变量：struct Page *pages; size_t npage; uint64_t va_pa_offset;；
-- uint64_t get_memory_base(void); uint64_t get_memory_size(void); 返回 DTB 报告的物理内存范围；
-- extern char end[]; 是内核镜像末尾的虚拟地址；
-- PADDR(kva) 把内核虚拟地址转为物理地址；pa2page(pa) 把物理地址转为 Page 描述符指针；
-- init_memmap(struct Page *base, size_t n) 把 n 个连续空闲页交给当前 pmm_manager；
-- SetPageReserved(page) 设置保留标志；可用 panic()、cprintf()。
+- struct trapframe 定义在 kern/trap/trap.h：共 36 个 uintptr_t，前 32 个依次是 x0~x31，后 4 个槽位依次保存 sstatus、sepc、sbadaddr、scause（结构体字段名为 status、epc、badvaddr、cause）。
+- SAVE_ALL 已实现：csrw sscratch, sp；sp -= 36 * REGBYTES；保存 x0、x1、x3~x31；csrrw s0, sscratch, x0；csrr s1~s4 保存 4 个 CSR；STORE s0, 2*REGBYTES(sp)；STORE s1~s4, 32~35*REGBYTES(sp)。
+- __trapret 已实现：RESTORE_ALL；sret。
+- REGBYTES = 8；LOAD/STORE 分别展开为 ld/sd。
+- void trap(struct trapframe *tf) 已实现，不需要修改。
 
 [GUARANTEE]
-- 必须实现 static void page_init(void);；
-- 如需要辅助函数，只能声明为 static，不得改动任何公开接口；
-- 成功后必须正确设置 va_pa_offset、npage、pages。
+- 只修改 RESTORE_ALL 宏体和 __alltraps 中 SAVE_ALL 之后的位置。
+- 不修改 SAVE_ALL、struct trapframe、trap() 的签名。
+- 不新增全局符号。
 
 [SPECIFICATION]
-Pre-Condition:
-- init_pmm_manager() 已执行，DTB 信息已就绪。
-
-Post-Condition:
-- va_pa_offset == PHYSICAL_MEMORY_OFFSET；
-- npage == PPN(get_memory_base() + get_memory_size())，且 npage > nbase；
-- pages == ROUNDUP((uintptr_t)end, PGSIZE)，描述符数组覆盖 [nbase, npage)；
-- 注册空闲区前，所有描述符先置为 reserved；
-- 只把完整空闲页区间注册给 init_memmap()：
-  起点 = ROUNDUP(PADDR(pages) + (npage - nbase) * sizeof(struct Page), PGSIZE)，
-  终点 = ROUNDDOWN(mem_base + mem_size, PGSIZE)；
-- 输出探测到的物理内存范围。
-
-Cases:
-1. DTB 返回的 base 或 size 为 0：panic() 终止；
-2. npage <= nbase：panic() 终止；
-3. 空闲区起点 >= 终点：不调用 init_memmap()；
-4. 内存末端非页对齐：向下取整，尾部不足一页不注册；
-5. 正常情况：按 Post-Condition 注册空闲页。
-
-Requirements:
-- 区分虚拟地址、物理地址、物理页号、Page 描述符地址；
-- 确保 OpenSBI 占用区、内核镜像、描述符数组都不进入空闲区；
-- 写功能与状态，不要输出逐步伪代码。
-````
-
-这样写的核心是：先说明功能边界和可验证的前置/后置/分支条件，再给最小可信依赖；不写逐步伪代码，也不把提交规则混进模块 prompt。
+RESTORE_ALL:
+- Pre-Condition：sp 指向 SAVE_ALL 建立的完整 trapframe；当前为 S 模式；SIE = 0。
+- Post-Condition：x1、x3~x31 和 sstatus/sepc/sbadaddr/scause 等于 trapframe 中对应槽位的值；sp 等于槽位 2 保存的原 sp；不修改 trapframe 以外的内存。
+- Case：任意寄存器值（包括 0、全 1、等于 sp）都必须正确恢复。
+- Requirements：x2(sp) 必须特殊处理；不得依赖任何寄存器进入前的值；CSR 写入借助的临时寄存器，其原值最终必须恢复；恢复 sstatus 不得在 sret 前意外打开中断。
+__alltraps:
+- Pre-Condition：SAVE_ALL 已执行，sp 指向 trapframe。
+- Post-Condition：以 trapframe 地址为第一个参数调用 trap()；返回后 sp 不变，控制流进入 __trapret。
+- Requirements：参数按 RISC-V ABI 放在 a0；不得破坏恢复所需的信息。
+```
 
 #### 实现迭代过程
 
-**第一次迭代**
-
-按当前四段式 prompt，在干净骨架副本（`7301f54` 的 `pmm.c`）上生成 `page_init`，编译一次通过；注入 `test_page_init()` 后运行，`[Test 1] Page Init: PASS`、`check_alloc_page() succeeded!`，无需第二次修改。
-
-> 该副本使用骨架自带的 `default_pmm_manager`，所以 `[Test 2] Best-Fit` 按预期 FAIL，不参与模块一验收。
-
-### Challenge：OS 如何获取可用物理内存范围
-
-**负责人：** 2411353-李行阳
-
-OS 不能提前知道内存范围，我认为可取的思路有让“比 OS 更早启动的软件”把内存情况交给它或者让它在启动时去主动获取：
-
-- **有标准固件/引导接口时**：RISC-V 由 OpenSBI 通过 DTB 告诉内核（本实验）；x86 由 BIOS e820 或 UEFI `GetMemoryMap()` 提供；服务器/虚拟机还可能由 ACPI 表或 hypervisor 配置。
-- **没有标准接口时**：内核只能自己探测内存控制器或尝试访问内存，但可能触发总线错误、覆盖固件数据，通常只作最后手段。
-
-本实验属于第一种：QEMU + OpenSBI 已经准备好 DTB，内核只需解析 `/memory`，再把可用页交给 `page_init()`。
-
----
-
-### 练习：理解 First-Fit
-
-**负责人：** 2412352-王治中
-
-#### 1. First-Fit 的工作过程
-
-First-Fit 用一条按页地址升序排列的空闲链表管理内存。每个空闲块只在链表中登记头页，头页的 `property` 记录块大小；因此从头遍历链表，第一个“够大”的块就是地址最低的满足块。
-
-**（1）初始化空闲页（`default_init` / `default_init_memmap`）**
-
-```c
-static void
-default_init(void) {
-    list_init(&free_list);
-    nr_free = 0;
-}
-
-static void
-default_init_memmap(struct Page *base, size_t n) {
-    struct Page *p = base;
-    for (; p != base + n; p++) {
-        assert(PageReserved(p));
-        p->flags = p->property = 0;
-        set_page_ref(p, 0);
-    }
-    base->property = n;
-    SetPageProperty(base);
-    nr_free += n;
-
-    if (list_empty(&free_list)) {
-        list_add(&free_list, &(base->page_link));
-    } else {
-        list_entry_t *le = &free_list;
-        while ((le = list_next(le)) != &free_list) {
-            struct Page *page = le2page(le, page_link);
-            if (base < page) {
-                list_add_before(le, &(base->page_link));
-                break;
-            } else if (list_next(le) == &free_list) {
-                list_add(le, &(base->page_link));
-            }
-        }
-    }
-}
-```
-
-- `default_init`：初始化空链表，并把空闲页计数清零。
-- `assert(PageReserved(p))`：这些页由 `page_init` 标为保留页，确认后才交给分配器。
-- `p->flags = p->property = 0` 与 `set_page_ref(p, 0)`：清除保留位、旧块大小和引用计数，使页可用。
-- `base->property = n`、`SetPageProperty(base)`：把连续 n 页看成一个空闲块；只有头页记录大小，并带有“空闲块头”标志。
-- `nr_free += n`：总空闲页数增加 n。
-- 插入时保持地址升序：空表用 `list_add`；否则找到第一个地址更大的块，用 `list_add_before` 插到它前面；若已到表尾，则用 `list_add` 追加。地址有序是“取低地址块”和“前、后邻合并”的基础。
-
-**（2）分配连续页（`default_alloc_pages`）**
-
-核心代码如下：
-
-```c
-if (n > nr_free)
-    return NULL;
-
-struct Page *page = NULL;
-list_entry_t *le = &free_list;
-while ((le = list_next(le)) != &free_list) {
-    struct Page *p = le2page(le, page_link);
-    if (p->property >= n) {
-        page = p;
-        break;
-    }
-}
-```
-
-- `n > nr_free`：总空闲页数都不够，直接返回 `NULL`。
-- 从表头逐块比较，遇到第一个 `property >= n` 的块就停止。因为链表按地址升序，这个块就是地址最低的满足块，这正是 First-Fit 的选块方式。
-
-```c
-if (page != NULL) {
-    list_entry_t *prev = list_prev(&(page->page_link));
-    list_del(&(page->page_link));
-    if (page->property > n) {
-        struct Page *p = page + n;
-        p->property = page->property - n;
-        SetPageProperty(p);
-        list_add(prev, &(p->page_link));
-    }
-    nr_free -= n;
-    ClearPageProperty(page);
-}
-return page;
-```
-
-- `prev`：先记住前驱，拆分后要把余量插回原来的位置。
-- `page + n`：从原块的第 n 页开始作为余量块。
-- 余量块大小改为“原大小减 n”，重新设置空闲块头标志，并插回 `prev` 后面，链表仍按地址升序。
-- `nr_free -= n`：只扣除实际分配的页数，余量仍算空闲。
-- `ClearPageProperty(page)`：返回给调用者的块头不再具有“空闲块头”标志。
-
-**（3）回收与合并（`default_free_pages`）**
-
-逐页校验并按地址插入空闲链表之后，执行前、后邻合并的核心代码如下：
-
-```c
-base->property = n;
-SetPageProperty(base);
-nr_free += n;
-/* 按页地址升序把 base 插入 free_list */
-
-list_entry_t *le = list_prev(&(base->page_link));
-if (le != &free_list) {
-    struct Page *p = le2page(le, page_link);
-    if (p + p->property == base) {
-        p->property += base->property;
-        ClearPageProperty(base);
-        list_del(&(base->page_link));
-        base = p;
-    }
-}
-
-le = list_next(&(base->page_link));
-if (le != &free_list) {
-    struct Page *p = le2page(le, page_link);
-    if (base + base->property == p) {
-        base->property += p->property;
-        ClearPageProperty(p);
-        list_del(&(p->page_link));
-    }
-}
-```
-
-- 回收前逐页检查 `!PageReserved(p) && !PageProperty(p)`，确认这些页已经分配、且不在空闲链表中，然后清空标志并重置引用计数。
-- 将 n 页重新组成一个空闲块：头页记录大小、设置空闲标志，`nr_free` 增加 n，再按地址升序插回链表。
-- **前邻合并**：若前一个空闲块 `p` 满足 `p + p->property == base`，说明两块地址连续，把 `base` 并入 `p`；合并后的块头是低地址的 `p`，并摘除 `base` 的链表节点。
-- **后邻合并**：若 `base + base->property == p`，说明 `base` 的末尾正好接上后一个块 `p`，把 `p` 并入 `base`，并摘除 `p` 的链表节点。
-- 因为链表有序、且相邻空闲块已经合并，所以只需检查前、后各一个块。
-
-#### 2. 问题解答：原有的 First-Fit 算法是否有改进空间？
-
-有，改进方向有以下两点：
-
-1. **缩短查找范围**：分配时从链表头逐个比较，空闲块较多时效率不高。可以按块的大小分组，把大小相近的块放在同一条链表中，查找时先进入合适的大小组；也可以把空闲块组织成按大小排序的平衡树，直接定位到合适的块。这样能减少需要比较的块数。
-2. **避免总是使用低地址**：First-Fit 每次都从最低地址开始找，低地址区域容易被切碎。可以记住上一次分配的位置，下次从该位置之后继续查找（Next-Fit），使空闲块的使用更均匀。
-
-### 功能模块：Best-Fit 物理内存分配
-
-**负责人：** 2412352-王治中
-
-#### 模块功能描述
-
-**需要实现/修改的函数：**
-
-```c
-static void best_fit_init(void);
-static void best_fit_init_memmap(struct Page *base, size_t n);
-static struct Page *best_fit_alloc_pages(size_t n);
-static void best_fit_free_pages(struct Page *base, size_t n);
-static size_t best_fit_nr_free_pages(void);
-const struct pmm_manager best_fit_pmm_manager;
-```
-
-**功能说明：**
-
-- **作用**：以 best-fit 策略管理页级物理内存，分配时从所有空闲块中选择能容纳请求的最小块，尽量把大块留给后续大请求；它是 `struct pmm_manager` 的另一种实现，用于替换默认的 First-Fit。
-- **主要场景**：
-  - 系统启动、`page_init()` 注册可用物理页时：把空闲区按页地址升序建成初始空闲链表；
-  - 运行期申请 n 页且存在满足条件的块时：选取“够用的最小块”，余量在块尾切分成新的空闲块；
-  - 申请时没有满足条件的块：返回 `NULL`，不改动空闲链表；
-  - 释放一段页面时：按地址插回空闲链表，并在与前、后邻块地址连续时合并；
-  - 框架查询空闲页数或执行自检时：返回总空闲页数，或运行 `best_fit_check()` 校验。
-- **交互关系**：`page_init()` 通过 `init_memmap()` 注册空闲区；`alloc_pages()/free_pages()` 经 `pmm_manager` 函数指针转发到本模块；块大小和链节点复用 `struct Page` 的 `property`、`page_link`，`free_area_t` 维护 `free_list/nr_free`。
-
-#### 最终提示词
-
-````text
-[PROMPT]
-**任务**：修改 kern/mm/best_fit_pmm.c 的 lab2、YOUR CODE 处，实现 Best-Fit 管理器并定义 best_fit_pmm_manager；在 kern/mm/pmm.c 的 init_pmm_manager() 中将当前物理内存管理器切换为best_fit_pmm_manager
-
-**操作要求**：你必须在项目中修改实际文件，保留现有代码，不得改动两个测试函数。
-
-**输出要求**：直接进行文件操作。
-
-[RELY]
-// 宏与结构
-PGSIZE；SetPageProperty / ClearPageProperty / PageProperty；struct Page；free_area_t
-// 可用函数
-list_add_before / list_del / list_next；pages、npage、nbase
-// 测试函数直接用 free_list、nr_free，须在本文件自行提供
-
-[GUARANTEE]
-```c
-static void best_fit_init(void);
-static void best_fit_init_memmap(struct Page *base, size_t n);
-static struct Page *best_fit_alloc_pages(size_t n);
-static void best_fit_free_pages(struct Page *base, size_t n);
-static size_t best_fit_nr_free_pages(void);
-const struct pmm_manager best_fit_pmm_manager;
-```
-
-[SPECIFICATION]
-## best_fit_init_memmap
-**Post-Condition**: 头页记录块页数并置标志，计数加 n，按页地址升序入链。
-
-## best_fit_alloc_pages
-**Post-Condition**: 取页数不小于 n 的最小块，同大小取低地址；余量切分成新块，无块可满足返回 NULL。
-
-## best_fit_free_pages
-**Post-Condition**: 按页地址升序插入，再与前、后相邻空闲块合并。
-````
-
-#### 实现迭代过程
-
-经过 1 次迭代，该模块最终：
-
-- ✅ 编译通过
-- ✅ 所有相关测试通过
-- ✅ 功能符合预期
-
-#### 改进空间
-
-**问题解答：你的 Best-Fit 算法是否有进一步的改进空间？**
-
-有，主要可以从以下三点改进：
-
-1. **缩小查找范围**：当前分配需要扫描整条空闲链表，才能确定最小的够用块。可以把大小相近的块分到不同的链表中，先查合适的大小组；也可以把空闲块组织成按大小排序的平衡树，直接找到最小的够用块。这样能减少比较次数。
-2. **减少小碎块**：Best-Fit 容易留下很小的余量，之后很难再使用。可以设置一个最小切分大小，当余量太小时，就把整块分配给请求。
-3. **降低回收插入的开销**：回收时仍要按地址线性查找插入位置；与按大小分组的链表配合，可以缩短每条链表的长度，减少插入时的比较。
-
-### 功能模块：Buddy System
-
-**负责人：** 2412352-王治中
-
-#### 模块功能描述
-
-**需要实现/修改的函数：**
-
-```c
-static void buddy_init(void);
-static void buddy_init_memmap(struct Page *base, size_t n);
-static struct Page *buddy_alloc_pages(size_t n);
-static void buddy_free_pages(struct Page *base, size_t n);
-static size_t buddy_nr_free_pages(void);
-static void buddy_check(void);
-const struct pmm_manager buddy_pmm_manager;
-```
-
-**功能说明：**
-
-- **作用**：按 2 的幂管理物理页，每阶维护一条按地址升序的空闲块链表。分配时向上取整到 2^k 并逐级分裂，回收时按页号异或定位同阶伙伴并逐级合并，合并路径短且无需扫描全表。
-- **主要场景**：
-  - 系统启动、注册空闲区时：空闲区起点通常不满足大阶对齐，按“起点对齐”贪心切成若干 2^k 块并挂入对应阶；
-  - 申请 n 页时：先把请求向上取整到 2^k；目标阶为空则从更高阶逐级分裂，低位交给调用者、高位留在低阶链；
-  - 申请时所有不小于请求的阶都为空：返回 `NULL`；
-  - 释放任意长度页面时：按对齐拆成若干 2^k 块，逐级与同阶伙伴合并；不互为伙伴的相邻块保持独立；
-  - 框架查询统计或自检时：返回总空闲页数，或运行 `buddy_check()` 校验各阶链表与分裂/合并行为。
-- **交互关系**：与 `pmm.c` 的 `pmm_manager` 接口对接，经 `init_memmap()/alloc_pages()/free_pages()` 被框架调用；用 `Page.property` 记录块大小、`PageProperty` 标识空闲块头、每阶 `free_area_t` 维护链表与计数。`MAX_ORDER = 16` 覆盖 128MB 的 2^15 个页，最高阶无可用块时返回 `NULL`，非 2 的幂请求存在向上取整的内部碎片。
-
-#### 测试函数
-
-**需要实现/修改的函数：**
-
-```c
-static void buddy_check(void);
-// 测试辅助函数
-static void buddy_check_lists(void);
-static void buddy_order_stat(size_t order, size_t *blocks, size_t *pages);
-static size_t buddy_block_count(size_t order);
-static void buddy_take_snapshot(size_t *blocks, size_t *pages);
-static void buddy_check_snapshot(const size_t *blocks, const size_t *pages,
-                                 size_t total_free);
-static struct Page *buddy_find_covering(struct Page *target);
-```
-
-**功能说明：**
-
-- **作用**：在 `buddy_pmm.c` 内实现自测入口 `buddy_check()`；由 `pmm_init() → check_alloc_page() → pmm_manager->check()` 自动调用，用于验证伙伴分配器的分裂、合并与计数是否正确。
-- **主要场景**：
-  - 内核启动、`pmm_init()` 调用 `check_alloc_page()` 时：执行 `buddy_check()`，先逐阶检查链表的基本性质，并记录初始的空闲块分布；
-  - 验证边界行为时：Case 1 覆盖非 2 的幂向上取整与耗尽后无块可分配；Case 2 覆盖无空闲页时对齐连续页合并、非伙伴页不合并；Case 3 覆盖逐页释放全部页后与初始分布一致；
-  - 用例通过时：输出 `[Buddy] Case N: PASS`，全部结束时输出总空闲页数。
-- **交互关系**：测试只读 `free_area[]`、`nr_free` 等状态，通过 `alloc_pages()/free_pages()/nr_free_pages()` 公共接口驱动分配器；每个用例通过则打印 `[Buddy] Case N: PASS`，全部结束时打印 `[Buddy] all tests passed, free pages = %lu`。
-
-#### 最终提示词
-
-生成 buddy system 的 prompt：
-
-````text
-[PROMPT]
-**任务**：从零生成伙伴系统分配模块，实现 2 的幂分块、分裂与伙伴合并并定义 buddy_pmm_manager；在 pmm.c 的 init_pmm_manager() 选它。
-
-**操作要求**：你必须在项目中创建并修改实际文件，不得改动已有分配模块及其测试函数。
-
-**输出要求**：直接进行文件操作。
-
-[RELY]
-// 宏与结构
-PG_property；struct Page；free_area_t
-// 可用函数
-list_add_before / list_del / list_next；pages、nbase；alloc_pages
-
-[GUARANTEE]
-```c
-static void buddy_init(void);
-static void buddy_init_memmap(struct Page *base, size_t n);
-static struct Page *buddy_alloc_pages(size_t n);
-static void buddy_free_pages(struct Page *base, size_t n);
-static size_t buddy_nr_free_pages(void);
-static void buddy_check(void);
-const struct pmm_manager buddy_pmm_manager;
-```
-
-[SPECIFICATION]
-## buddy_init_memmap
-**Post-Condition**: 按"起点对齐"贪心切成若干 2^k 块，按地址升序挂入对应阶。
-
-## buddy_alloc_pages
-**Post-Condition**: 取不小于 n 的最小阶块，不足则从更高阶逐级分裂、低位交出；无可用块返回 NULL。
-
-## buddy_free_pages
-**Post-Condition**: 逐级与同阶伙伴合并，摘链时扣减总空闲页数并清旧块头标志。
-````
-
-测试 prompt：
-
-````text
-[PROMPT]
-**任务**：在伙伴系统模块的实现文件内写测试，入口 buddy_check
-
-**操作要求**：你必须在项目中修改实际文件，不改被测函数与其它模块。
-
-**输出要求**：直接进行文件操作。每个用例通过时打印一行 [Buddy] Case N: PASS，全部结束时打印 [Buddy] all tests passed, free pages = %lu
-
-[RELY]
-// 可访问状态
-各阶链表与块数、总空闲页数等
-// 可用函数
-alloc_pages / free_pages / nr_free_pages；assert；cprintf
-
-[GUARANTEE]
-```c
-static void buddy_check(void);
-```
-
-[SPECIFICATION]
-## buddy_check
-**Post-Condition**: 逐阶校验地址升序、按阶对齐、块页数之和等于总空闲页数；各阶分配释放往返后总数复原。
-
-  **Case 1**: 分配到耗尽后无块可分配，非 2 的幂请求按向上取整处理。
-
-  **Case 2**: 无空闲页时释放一段按阶对齐的连续页应合成更大阶的块，互不为伙伴的两页不得合并。
-
-  **Case 3**: 逐页释放全部后，总数与各阶块数回到初始快照。
-````
-
-#### 实现迭代过程
+本模块共 1 次生成迭代。
 
 ##### 第一次迭代
 
-**遇到的问题：**
-
-- 问题1：由于提示词中没有显示要求，Buddy System通过测试时在终端没有任何明显的输出。
-
-**问题解决策略：**
-
-- 针对问题1，在 [PROMPT] 的“输出要求”中添加提示词：每个用例通过时打印一行 [Buddy] Case N: PASS，全部结束时打印 [Buddy] all tests passed, free pages = %lu
+- **结果**：AI 按上述 spec 生成 `RESTORE_ALL` 和 `__alltraps` 入口代码；汇编通过，`__alltraps` 仍保持 4 字节对齐。
+- **验证**：在 `/tmp` 副本中补上两个临时 handler 桩，用 QEMU 4.1.1 以 `GRADE_LAB3_CONTEXT` 单独运行 Test 1，结果为 **PASS 35/35**；反汇编确认执行顺序为“CSR → 通用寄存器 → sp 最后 → sret”。
+- **遇到的问题**：生成代码本身没有出现寄存器恢复类 bug；验证时遇到的是 lab3 讲义缺少部分 lab2 依赖，直接 `make` 会在物理内存目录链接失败。这与本模块逻辑无关；合并 lab2 实现后，整树可编译并进入 Test 1。
+- **关键改进点**：
+  - `RESTORE_ALL` 先恢复 CSR，再恢复通用寄存器，最后恢复 `sp`；
+  - 借用 `s1~s4` 恢复 CSR 后，从槽位 9/18/19/20 重新加载它们的原值；
+  - `__alltraps` 只增加 `mv a0, sp` 与 `jal trap` 两条指令，其余交给框架的 `__trapret`。
 
 **最终结果：**
 
-经过 2 次迭代，该模块最终：
-
-- ✅ 编译通过
-- ✅ 所有相关测试通过
-- ✅ 功能符合预期
-
-**关键改进点总结：**
-
-1. 在 [PROMPT] 的“输出要求”中增加 `[Buddy] Case N: PASS` 与总结行，解决“测试通过但终端无输出”的问题。
+- ✅ 汇编通过，`__alltraps` 4 字节对齐；
+- ✅ Test 1 PASS（35/35）；
+- ✅ 反汇编结构与 `SAVE_ALL` 的布局一致。
 
 ---
 
-#### 测试覆盖与有效性
+### 功能模块二：中断与异常处理
 
-**测试覆盖的核心行为与边界情况**
+**负责人：** 2412195-邵毅（异常处理）、2412352-王治中（中断与时钟）
 
-- **核心行为**：
-  - 初始切分：空闲区按“起点对齐”贪心切成若干 2^k 块，按地址升序挂入对应阶；
-  - 逐阶基本性质：地址升序、块头按阶对齐、`PageProperty` 与 `property` 正确、各阶块页数之和等于总空闲页数；
-  - 分配：取不小于 n 的最小阶块，逐级分裂且低位交出，返回块对齐、计数正确减少；
-  - 回收：任意长度拆成对齐块，逐级与同阶伙伴合并；
-  - 分配后再释放：每个可达阶分配并释放一次后，各阶块数、各阶页数和总数都应恢复到初始值。
-- **边界情况**：
-  - Case 1：非 2 的幂请求向上取整（3→4、5→8）；从高阶到低阶耗尽全部空闲块后，`alloc_page()` 与 `alloc_pages(2/3)` 均返回 `NULL`；
-  - Case 2：无空闲页时释放一段 2 阶对齐的连续 4 页，只生成一个 2 阶块；释放两个互不为伙伴的页（`b+4`、`b+6`）时保持两个 0 阶块、不发生合并；补齐后逐级合并为一个 3 阶块；
-  - Case 3：逐页释放全部页面后，各阶块数与总数与初始分布完全一致；
-  - 最高阶无可用块、单页释放、空闲链表为空等边界。
+#### 模块功能描述
 
-**为什么这些测试能有效检验 Buddy System**
-
-1. 测试全部通过 `alloc_pages/free_pages/nr_free_pages` 公共接口驱动，并直接检查可观察状态（链表顺序、对齐、`property`、`nr_free`），不依赖内部实现细节。
-2. 这些测试能同时发现泄漏（页数变少）、重复计数（页数变多）、漏合并（块数偏多）和误合并（块数偏少）。
-3. “先耗尽、再逐页归还”的流程集中覆盖分裂与合并的最坏路径；用例结束后恢复初始状态，不影响后续内核运行。
-
-### Challenge：SLUB（选做）
-
-**负责人：** 2412195-邵毅
-
-#### 总体思想
-
-传统 SLUB 将内存管理分为两层：
-
-1. **页分配层**：以页为粒度管理物理内存。
-2. **对象分配层**：把若干连续页组织成 slab，再将 slab 切分成固定大小的对象，供上层按对象申请和释放。
-
-每个对象大小等级对应一个缓存（cache）。同一缓存中的对象大小相同，因此可以预先按固定步长切分页面，并通过空闲对象链表快速分配和回收。
-
-SLUB 的核心语义可以概括为：
-
-- 对象按大小归并到有限个大小等级；
-- 每个 slab 由整页组成，页内切分为多个对象；
-- 空闲对象自身空间内嵌“下一个空闲对象”的指针，形成 freelist；
-- 分配时优先使用当前缓存中部分占用的 slab；
-- 当部分占用 slab 中没有空闲对象时，才向页分配层申请新页；
-- slab 中所有对象都释放后，整页归还页分配层；
-- 缓存的元数据不能通过对象分配器自身申请，否则会形成递归。
-
-Linux SLUB 还包含 per-CPU 缓存、RCU 延迟释放、复杂 partial 列表排序、slab 合并、debug 选项等机制。本实验只保留 SLUB 的主体思想，单核运行，不加锁，也不做性能优化。
-
-#### 数据结构
-
-本实验直接复用该 slab 页对应的 `struct Page` 描述符保存 slab 状态：
-
-| `struct Page` 字段      | slab 状态下的用途               |
-| ----------------------- | ------------------------------- |
-| `flags` 的 `PG_slab` 位 | 标记该页当前是一个 slab 页      |
-| `property`              | 所属缓存的下标                  |
-| `ref`                   | 该 slab 中当前已分配对象数      |
-| `page_link.next`        | partial slab 单链表的下一个节点 |
-| `page_link.prev`        | 页内 freelist 的头指针          |
-
-对象大小向上归并到 10 个 2 的幂等级，每个等级对应一个 `kmem_cache`：
+本模块涉及 `kern/trap/trap.c` 中的两个函数：
 
 ```c
-struct kmem_cache {
-    size_t size;          /* 对象大小 8, 16, 32, …… , 1024, 2048, 4096 字节*/
-    size_t objs_per_slab; /* 每页对象数 */
-    struct Page *partial; /* 还有空闲对象的 slab 单链表 */
-    size_t nr_slabs;      /* 当前活跃 slab 数 */
-};
+void interrupt_handler(struct trapframe *tf);   // trap.c:88-144
+void exception_handler(struct trapframe *tf);   // trap.c:154-170
 ```
 
-每个 slab 创建时，把页面按对象大小切分，并把所有空闲对象串成一条单链表：“下一个空闲对象”的指针直接写在空闲对象的起始位置，不额外维护位图或外部链表。只有对象处于空闲状态时，该位置才用于 freelist；对象分配出去后，整块空间都交给调用方使用。
+`trap_dispatch()`（`trap.c:172-180`）在 `tf->cause` 最高位为 1 时调用 `interrupt_handler()`，否则调用 `exception_handler()`。两个函数不直接写 CSR，只通过 `trapframe` 影响返回状态：`interrupt_handler()` 不修改 `tf`，`exception_handler()` 只修改 `tf->epc`；返回后由 `__trapret` 的 `RESTORE_ALL` 把 `tf->epc` 等写回 CSR，再执行 `sret`。
 
-```text
-free object:
-+----------------------+-------------------------------+
-| next free object ptr |        对象剩余可用空间        |
-+----------------------+-------------------------------+
+**中断处理：**
 
-slab freelist head
-        |
-        v
-   +---------+    +---------+    +---------+
-   | object0 | -> | object1 | -> | object2 | -> NULL
-   +---------+    +---------+    +---------+
-```
-#### 算法流程
+- **中断原因识别**：`scause` 最高位是中断标志，低位是中断号。实现先清除最高位，再匹配 `IRQ_*`：
+  `uintptr_t cause = tf->cause & ~((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1));`
+- **时钟中断（`IRQ_S_TIMER`）**：先调用 `clock_set_next_event()` 重装下一次时钟，再执行 `ticks++`；每 `TICK_NUM`（100）次调用 `print_ticks()` 输出一行 `100 ticks`；累计到 `SHUTDOWN_AFTER * TICK_NUM` 时输出关机提示并调用 `sbi_shutdown()`。
+- **其他中断**：已定义类型只输出类型提示；未知中断输出 `Unknown interrupt: cause %d` 后调用 `print_trapframe(tf)`。
 
-分配时 `kmalloc(size)` 先找到最小的满足 `size <= class_size` 的等级：若 `cache->partial` 非空，就从 partial slab 的 freelist 头部取对象并更新 `inuse`，取满后把该 slab 移出 partial；只有没有可用 partial slab 时，才向页层申请新页、初始化 slab 元数据并构造 freelist。
+**异常处理：**
 
-释放时 `kfree(ptr)` 通过指针计算物理页号和 `struct Page`，再经 `property` 定位缓存，校验对象大小对齐与是否重复释放（扫描该 slab 的 freelist，对象若已出现在空闲链表中即判定为双重释放）；当 slab 的 `inuse` 减到 0 时，把它从 partial 链表摘除、清除 slab 元数据并调用 `free_page()` 归还整页。因此不保留空 slab，全部对象释放后系统空闲页数能精确恢复。缓存元数据不通过对象分配器自身申请，避免“元数据分配又触发元数据分配”的递归。
+- **非法指令/断点**：输出 `Illegal instruction at ...` / `Breakpoint at ...`，然后按指令长度推进 `tf->epc`。
+- **指令长度**：读取 `tf->epc` 处的 16 位半字，低两位为 `0b11` 表示 32 位指令（偏移 +4），否则为 16 位压缩指令（偏移 +2）。
+- **其他异常**：只调用 `print_trapframe(tf)` 兜底，不修改 `tf->epc`。
 
-#### 错误语义
+**关键点：**
 
-这些语义在 `slub.h` 中声明，实现和测试保持一致：
-
-| 情况 | 行为 |
-|---|---|
-| `kmalloc(0)`、`kmalloc(size > PGSIZE)` | 返回 `NULL` |
-| 物理页耗尽 | 返回 `NULL` |
-| 未初始化就调用 `kmalloc` / `kfree` | `panic` |
-| `kfree(NULL)` | `panic` |
-| 指针不在管理内存范围，或所在页不是 slab | `panic` |
-| 指针不是对象边界 | `panic` |
-| slab 引用计数异常，或 freelist 损坏/成环 | `panic` |
-| 双重释放 | `panic` |
+1. **改 `tf->epc`，不改 `sepc`**：`RESTORE_ALL` 会用 `trapframe` 中的 `epc` 覆盖 `sepc`；直接写 `sepc` 会被恢复流程覆盖，达不到跳过异常指令的效果。
+2. **时钟必须重装**：`clock_set_next_event()` 设置的是一次性事件；不重装，系统只会收到一次时钟中断。先重装再输出/关机，可以减少延迟，并保证重装不会被后续路径跳过。
+3. **`SHUTDOWN_AFTER` 是本次新增的宏**：原始代码框架未定义（讲义只把它列为应使用的宏）；实现中在 `trap.c` 顶部增加 `#define SHUTDOWN_AFTER 10`，表示累计 10 次 `100 ticks` 输出（1000 ticks）后关机。
+4. **输出格式以 `grade.sh`/测试为准**：指导书只写“规定格式”，具体匹配串由 `tools/grade.sh` 给出（`Breakpoint at`、`Illegal instruction at`、`Supervisor software interrupt`、`Unknown interrupt: cause`、`cause    0x...`）。
 
 #### 最终提示词
 
-SLUB 分两轮完成：第一轮实现分配器，第二轮在实现完成后单独设计黑盒测试。两次提示词如下。
+模块二的最终提示词如下（四段式；`SHUTDOWN_AFTER` 在原始框架中不存在，提示词中已注明需要新增）：
 
-**Prompt 1：从零实现 SLUB 分配器**
-
-```text
+````text
 [PROMPT]
+**任务**：修改 code/kern/trap/trap.c，实现 lab3 功能模块二“中断与异常处理”，完成 interrupt_handler() 和 exception_handler() 两个函数。interrupt_handler() 负责对 Trap 入口送来的中断按原因分类处理；exception_handler() 负责对同步异常分类处理。两个函数处理结束后都必须返回到 trap_dispatch()/trap()，由已有的 Trap 返回流程恢复现场并执行 sret。
 
-新建 code/kern/mm/slub.h 和 slub.c，在页分配器之上实现 SLUB 风格的第二层对象分配，提供 kmalloc(size) / kfree(ptr)（后者只传对象指针）。必须修改实际文件，只新增这两个文件和入口一行调用 slub_init();（位于 pmm_init(); 之后）；单核不加锁，不实现 per-CPU、RCU、复杂 partial 排序。大小等级、对齐与错误语义写入 slub.h 注释并与实现一致；make 通过，QEMU 启动初始化无 panic。
+**操作要求**：必须实际修改项目文件，不要只展示代码。保留 trap.c 中已有代码和注释，只在标有 `//lab3 function2` 的位置补全两个函数；如需 `SHUTDOWN_AFTER`，可在 trap.c 顶部新增宏定义。不得修改两个函数的签名，不得修改 trap.c 中规定以外的其他函数（包括 trap_dispatch()、trap()、print_trapframe()、print_regs()、print_ticks()、idt_init()、trap_in_kernel() 等），不得改动 trapentry.S、trap.h 中的现有接口和数据结构。如需辅助函数，应声明为 static，仅供本模块内部使用。
+
+**输出要求**：直接进行文件操作；实现必须使用下面 [RELY] 中列出的、工程中真实存在的宏、结构体、全局变量和函数，不要引入无关功能或自造接口。
 
 [RELY]
+// 结构体（code/kern/trap/trap.h）
+struct trapframe {
+    struct pushregs gpr;
+    uintptr_t status;
+    uintptr_t epc;       // 触发 Trap 的指令地址
+    uintptr_t badvaddr;
+    uintptr_t cause;     // scause
+};
+// tf->cause 最高位为 1 表示中断，为 0 表示同步异常。
+// trap_dispatch() 已按 (intptr_t)tf->cause < 0 分流：
+// 中断进入 interrupt_handler()，异常进入 exception_handler()。
 
-  类别   	关键内容                                    
-  宏    	PGSIZE、PGSHIFT、PPN()、KERNBASE、KERNTOP、ROUNDUP()、ROUNDDOWN()
-  结构   	struct Page（ref、flags、property、page_link）、list_entry_t
-  页层接口 	alloc_page()、free_page()、nr_free_pages()
-  地址关系 	DRAM 直映射到 [KERNBASE, KERNTOP)，VA = PA + va_pa_offset；page2pa()、pa2page()、PADDR()、pages、nbase、va_pa_offset
-  调试/顺序	assert()、panic()（不返回）、cprintf()；先 pmm_init() 后 slub_init()
+// 中断原因（code/libs/riscv.h）
+IRQ_U_SOFT=0，IRQ_S_SOFT=1，IRQ_H_SOFT=2，IRQ_M_SOFT=3，
+IRQ_U_TIMER=4，IRQ_S_TIMER=5，IRQ_H_TIMER=6，IRQ_M_TIMER=7，
+IRQ_U_EXT=8，IRQ_S_EXT=9，IRQ_H_EXT=10，IRQ_M_EXT=11。
+
+// 异常原因（code/libs/riscv.h）
+CAUSE_ILLEGAL_INSTRUCTION=0x2，CAUSE_BREAKPOINT=0x3。
+
+// 时钟与统计（code/kern/trap/trap.c、code/kern/driver/clock.h）
+TICK_NUM=100（已有）；SHUTDOWN_AFTER 需新增（本实现取 10）； 
+extern volatile size_t ticks;
+static void print_ticks(void);        // 已有，输出 "%d ticks\n"（TICK_NUM）
+void clock_set_next_event(void);      // 通过 SBI 设定下一次时钟事件；必须调用才能持续收到时钟中断
+void sbi_shutdown(void);              // code/libs/sbi.h，关机后不返回
+
+// 输出与调试
+void print_trapframe(struct trapframe *tf);  // 已有，打印完整 Trap frame
+int cprintf(const char *fmt, ...);           // 已有
+
+// Trap 返回机制
+// trapentry.S 的 RESTORE_ALL 会把 tf->status、tf->epc、tf->badvaddr、tf->cause
+// 写回对应 CSR，然后执行 sret。因此异常处理应更新 trapframe 中的 tf->epc，
+// 不能直接写 sepc 后假定返回流程会跳过当前指令。
+
+// RISC-V 指令长度
+// 16 位压缩指令：指令低两位 != 0b11；
+// 32 位指令：指令低两位 == 0b11。
+// ebreak 为 32 位，c.ebreak 为 16 位。
 
 [GUARANTEE]
-
-    void slub_init(void);
-    void *kmalloc(size_t size);
-    void kfree(void *ptr);
-
-可添加 static 辅助函数与静态变量（如缓存表），不得改变公开接口。
-
-[SPECIFICATION]
-
-slub_init：首次调用建立各等级缓存，重复调用直接返回；不申请页，nr_free_pages() 不变；元数据必须静态获得，禁止用对象分配器申请元数据（无递归）。
-
-kmalloc：未初始化则 panic。size==0 或超单页返回 NULL；优先从部分占用 slab 分配（不申请新页），其无空闲对象时才向页层申请一个整页作新 slab，页层耗尽返回 NULL。每 slab 恰好一页，freelist 指针存于空闲对象自身空间；返回指针满足等级对齐、空间不小于请求、与存活对象不重叠。
-
-kfree：只传指针，由指针自行定位 slab/cache。合法对象回到其 slab 空闲链表；slab 全空则当次归还整页且不保留（全部释放后 nr_free_pages() 恢复原值），归还前清除页描述符上的本模块状态。以下 panic：ptr==NULL、不在 [KERNBASE, KERNTOP)、页非 slab、偏移非对象边界、元数据非法、双重释放。
-```
-**Prompt 2：为已实现的 SLUB 设计测试**
-
-```text
-[PROMPT]
-
-先读 slub.h 确认接口与已声明语义，新建 code/kern/mm/slub_check.c（可配 slub_check.h），实现统一入口 check_slub()，在 slub_init(); 之后调用。禁止修改 slub.c/slub.h，禁止读写分配器内部结构（缓存表、partial 链表、freelist、struct Page 字段），只用 kmalloc/kfree 与页分配器查询接口黑盒测试；断言失败即停机，控制资源用量避免耗尽内存。每项通过打印"检查项 + PASS"，最后打印总结；合法路径不 panic，非法使用必须 panic 且作为独立最小运行阶段；make 通过，QEMU 自动运行全部检查通过。
-
-[RELY]
-
-- 被测接口：slub_init(void)、kmalloc(size_t size)、kfree(void *ptr)，以 slub.h 实际声明为准。
-- 已声明语义（须按此验证）：等级 8..4096 共 10 级、向上归并、同级共用缓存、按等级对齐；kmalloc(0)、超单页、页层耗尽返回 NULL；未初始化即用、kfree(NULL)、非法/非边界/双重释放 panic；不保留空 slab，测试前后空闲页数应一致。
-- 可用接口与资源：nr_free_pages()、PGSIZE、assert()、panic()、cprintf()；128 MiB DRAM 空闲页约 3.2 万，随机阶段存活对象至多数百个。
-
-[GUARANTEE]
-
-    void check_slub(void);
-    void check_slub_bad_use(int which);
-
-后者为非法使用的独立 panic 阶段（which 取 0..3，每 case 单独启动一次）。可添加 static 辅助函数、测试静态数组、模式校验函数、固定种子随机生成器。
-
-[SPECIFICATION]
-
-check_slub：入口记录 nr_free_pages() 基准，全部通过后对象全部释放、页数与基准一致并打印总结；任一失败立即 panic。
-
-  检查          	方法                                      
-  1 分配有效性     	1B/小/中/近最大尺寸逐个分配，写满模式读回；验证 size==0 与超单页返回 NULL
-  2 不重叠与对齐    	多种尺寸对象交叉读写，地址满足等级对齐                     
-  3 释放复用      	分配 A、邻居 B → 释放 A → 再分配须复用 A，B 不破坏       
-  4 slab 增长   	分配远超单页容量（如 640 个），中途穿插释放再补，全部存活且内容正确    
-  5 slab 收缩无泄漏	多尺寸对象全部释放，nr_free_pages() 精确恢复          
-  6 交错分配/释放   	分批释放部分后继续分配，存活对象不破坏、释放空间可复用             
-  8 随机压力      	固定种子多尺寸交替数百次分配/释放，随机抽验，结束全部释放并校验页数      
-
-check_slub_bad_use：必须由被测实现 panic 且不返回，若返回则测试自行 panic 报"非法操作未被检测"。case 0 同地址连续释放两次（双重释放）；case 1 释放栈上地址（非 slab 页）；case 2 kfree(NULL)；case 3 释放对象内部 +1 指针（非对象边界）。
-```
-
-#### 实现与测试
-
-| 文件                        | 作用                                             |
-| --------------------------- | ------------------------------------------------ |
-| `code/kern/mm/slub.h`       | 对象分配器对外接口和错误语义声明                 |
-| `code/kern/mm/slub.c`       | SLUB 风格分配器实现                              |
-| `code/kern/mm/slub_check.h` | 黑盒测试入口声明                                 |
-| `code/kern/mm/slub_check.c` | 黑盒测试实现                                     |
-| `code/kern/init/init.c`     | `pmm_init();` 后调用 `slub_init();check_slub();` |
-
-| 函数                     | 作用                                                 |
-| ------------------------ | ---------------------------------------------------- |
-| `slab_page_base()`       | 页描述符转内核虚拟地址                               |
-| `slab_page_from_ptr()`   | 对象指针转页描述符                                   |
-| `slab_create()`          | 申请一页并切分对象、构造 freelist                    |
-| `slab_alloc_object()`    | 从 slab freelist 取出一个对象                        |
-| `slab_object_is_free()`  | 扫描 freelist，检测双重释放和链表损坏                |
-| `cache_add_partial()`    | 把 slab 加入 partial 单链表头部                      |
-| `cache_remove_partial()` | 从 partial 单链表中摘除 slab                         |
-| `kmalloc()`              | 大小归并、partial 优先分配、必要时申请新页，对外接口 |
-| `kfree()`                | 定位 slab/cache、校验、释放对象或归还整页，对外接口  |
-
-| 编号 | 检查内容 |
-|---|---|
-| 1 | 1B、小对象、中对象、接近 4096B 的对象逐个分配，写满实际大小后读回；验证 `size==0`、`size>PGSIZE` 返回 `NULL` |
-| 2 | 同时持有 32 个不同尺寸对象，全部写满后交叉校验；检查每个对象按其大小等级对齐 |
-| 3 | 分配 A、B；释放 A；再分配同尺寸 C，要求 `C == A`，且 B 内容不变 |
-| 4 | 32B 等级连续分配 640 个对象，超过单页 128 个的容量；中途释放并补分配，最终全部存活且内容正确 |
-| 5 | 分配多种尺寸共 200 个对象后全部释放，要求空闲页数精确恢复 |
-| 6 | 分配 256 个对象，释放一部分后继续分配，再检查所有存活对象 |
-| 7 | 双重释放、释放栈地址、`kfree(NULL)`、释放非对象边界指针，四类非法操作必须 panic |
-| 8 | 固定种子随机压力：4000 次随机分配/释放，最多同时存活 384 个对象，多尺寸随机抽验 |
-
-这些测试全部通过 `kmalloc/kfree` 和页分配器的可查询接口做黑盒验证，不读待测实现的内部链表；覆盖对象大小边界、对象间踩踏、释放复用、slab 增长/收缩、页数泄漏和固定种子随机压力，能同时发现越界、重复分配、漏合并/误合并和空闲页泄漏。
-
-实测 8 项检查全部通过，空闲页数恢复到 `31921`；检查 7 的四类非法操作按预期 panic。完整输出见第五节。
-
----
-
-### 分支任务：GDB 调试页表查询过程
-
-**负责人：** 2411353-李行阳
-
-本分支任务按指导书“调试要求”的六条组织。观察对象是 `kern_init` 的第 8 条指令 `sd ra,8(sp)`；调试环境为 QEMU 4.1.1，host 用本机 `gdb`，guest 用 `gdb-multiarch`。按指导书的三终端方式：终端 1 用 `make debug` 启动并暂停 QEMU；终端 2 用 `sudo gdb` attach 到 QEMU 进程；终端 3 用 `gdb-multiarch` 连接 1234 端口。guest GDB 设置 `set remotetimeout unlimited`，host GDB 设置 `handle SIGPIPE nostop noprint`。
-
-#### 1. 关键调用路径与关键分支
-
-一次 guest 数据 store 在 TLB miss 后的调用路径：
-
-```text
-helper_le_stq_mmu            (accel/tcg/cputlb.c:1669 定义；1672 调用 store_helper)
-  -> store_helper            (accel/tcg/cputlb.c:1501 定义；1522 调用 tlb_fill)
-     -> tlb_fill             (accel/tcg/cputlb.c:868 定义；878 经 cc->tlb_fill 调 RISC-V 回调，注册于 cpu.c:489)
-        -> riscv_cpu_tlb_fill (target/riscv/cpu_helper.c:435 定义；451 调用 get_physical_address，472 调用 tlb_set_page)
-           -> get_physical_address (target/riscv/cpu_helper.c:155 定义)
-           -> tlb_set_page        (accel/tcg/cputlb.c:843 定义；847 调用 tlb_set_page_with_attrs)
-```
-
-> 指导书的“思考”还提出更省事的做法：不单步 guest，直接在 QEMU 的翻译函数上下条件断点。需要注意：`access_type` 的 0/1/2 分别是 `MMU_DATA_LOAD`、`MMU_DATA_STORE`、`MMU_INST_FETCH`；GDB 通过 gdbstub 读 guest 内存（如 `x/8i`、反汇编）时也会以 0 调用 `get_physical_address`，和 guest 的普通 load 同类型。可以用 `c` 跳过 0，或加 `access_type == 1` 只保留 store；条件断点只是减少停顿，最终观测值一致。
-
-`get_physical_address()` 的关键分支：
-
-1. 先处理 MPRV：M 模式非取指访问且 `mstatus.MPRV=1` 时，把 `mode` 改为 `mstatus.MPP`；
-2. `mode == PRV_M || !riscv_feature(env, RISCV_FEATURE_MMU)`：直接透传，`*physical = addr`，`prot = R|W|X`；
-3. 读 `satp` 的 `PPN` 和 `MODE`；`MODE` 选择 SV32/SV39/SV48/SV57，`MODE=Bare` 直接透传；
-4. 地址高位 canonical 检查；
-5. 按 `MODE` 决定 `levels` 的页表循环；本次 SV39 为 3 级；
-6. `!(pte & PTE_V)`：无效 PTE，失败；
-7. `!(pte & (PTE_R|PTE_W|PTE_X))`：非叶子，`base = ppn << PGSHIFT`，继续下一级；
-8. 保留组合 W / WX、U/S 权限、PPN 对齐、load/store/fetch 权限、A/D 位更新；
-9. 叶子 PTE：计算物理页基址并设置 `prot`。
-
-观察点：
-
-- `kern_init` 入口 `sp = 0xffffffffc0205000`；
-- 第 5 条 `addi sp,sp,-16` 执行后 `sp = 0xffffffffc0204ff0`；
-- 第 8 条 `sd ra,8(sp)` 的访存地址：`VA = sp + 8 = 0xffffffffc0204ff8`。
-
-实测值：
-
-| 项目 | 值 |
-|---|---|
-| `satp` | `0x8000000000080205`（SV39，根页表基址 `0x80205000`） |
-| 特权级 / 访问类型 | S 模式；`MMU_DATA_STORE`（`access_type = 1`） |
-| 页表级数 / 第 0 轮 | 3 级，9 位索引；`i=0, ptshift=18, idx=511` |
-| PTE 地址 / PTE 值 | `0x80205ff8`；`0x200000cf` |
-| PPN / 物理页基址 | `0x80000`；`0x80204000` |
-| 页内偏移 / 最终物理地址 | `0xff8`；`0x80204ff8` |
-| 最终权限 | `prot=7`（读/写/执行） |
-
-演示过程：guest 在 `kern_init` 停住，单步到第 8 条 `sd ra,8(sp)`；执行后 host 命中 `get_physical_address`，读到 `addr=0xffffffffc0204ff8`、`access_type=1`、`mmu_idx=1`；继续单步/行断点可看到上表的值；最后 `tlb_set_page` 显示 `paddr=0x80204000`、`prot=7`。
-
-![guest 在 kern_init 的 8 条指令](images/01_guest_kern_init_x8i.png)
-
-*图 1：guest GDB 停在 `kern_init`，第 8 条为 `sd ra,8(sp)`。*
-
-![host 在 get_physical_address 的调用链](images/07_host_backtrace_158.png)
-
-*图 2：host GDB 的 `bt`，显示 `store_helper → tlb_fill → riscv_cpu_tlb_fill → get_physical_address`。*
-
-> 更稳的入口：先 `b riscv_cpu_tlb_fill`，它只在 guest 真实 TLB miss 时触发，不会被 GDB 的 `x/8i` 打断；命中后再设 252/256/337 行断点。两种方式观察到的值相同。
-
-#### 2. 单步页表翻译
-
-源码里是一个循环：
-
+必须实现或修改的接口：
 ```c
-for (i = 0; i < levels; i++, ptshift -= ptidxbits) {
-    target_ulong idx = (addr >> (PGSHIFT + ptshift)) &
-                       ((1 << ptidxbits) - 1);
-    target_ulong pte_addr = base + idx * ptesize;
-    target_ulong pte = ldq_phys(cs->as, pte_addr);
-    ...
-}
+void interrupt_handler(struct trapframe *tf);
+void exception_handler(struct trapframe *tf);
 ```
 
-- `levels=3`、`ptidxbits=9`，所以“三个循环”准确说是**同一个循环跑 3 轮**（VPN[2] → VPN[1] → VPN[0]），不是三个并列循环；
-- 本次 trace 只跑第 0 轮，因为根 PTE 是 1GB 叶子（V/R/W/X 均置位）；U=0、S 模式、A/D 已置位等检查均通过；
-- “两行”对应“先算 PTE 物理地址，再从 guest 物理内存读 PTE”：`pte_addr = base + idx * ptesize` 和 `pte = ldq_phys(...)`，确实是从当前页表取出页表项；
-- PTE 的 PPN=0x80000 对应 1GB 页基址 `0x80000000`；QEMU 在 superpage 情况下为 TLB 生成伪 4K 叶表项，把 VPN 低 18 位折进 PPN，得到 4K 页基址 `0x80204000`，再加页内偏移 `0xff8`，最终是 `0x80204ff8`；
-- `prot` 在源码 337 行时还是 0，权限位在后面的 `if` 里才设置；`tlb_set_page` 看到的最终值是 7。
+可以根据需要添加：
+- 静态辅助函数（建议声明为 static，例如用于判断异常指令长度）；
+- 本模块内部使用的宏定义或静态变量。
 
-![252 行 info locals](images/02_host_line252_info_locals.png)
+不得改变上述公开接口，不得新增与实验无关的全局接口。
 
-*图 3：252 行，`idx=511`、`pte_addr=0x80205ff8`、`base=0x80205000`、`levels=3`、`ptshift=18`。*
+[SPECIFICATION]
+## interrupt_handler
 
-![337 行 physical](images/04_host_line337_physical.png)
+**Pre-Condition**:
+- 由 trap_dispatch() 在 tf->cause 最高位为 1（中断）时调用，tf 指向有效的 trapframe；
+- Trap 入口已保存现场，处理函数返回后由统一的 Trap 返回流程恢复现场并执行 sret。
 
-*图 4：337 行，`p/x *physical` 得到物理页基址 `0x80204000`。*
+**Post-Condition**:
+- 按 tf->cause 去掉最高位后的中断原因完成对应处理，函数返回后 trap() 能正常返回；
+- 每收到一次 Supervisor 时钟中断，ticks 恰好增加 1，并且下一次时钟事件已被重新设定；
+- 非时钟中断不改变 ticks、不重新设定时钟事件、不推进 tf->epc；
+- 无法识别的中断已输出完整 Trap frame 供调试。
 
-#### 3. QEMU 中模拟 TLB 查找的代码
+**Case 1**：tf->cause 去掉最高位后为 IRQ_S_TIMER。
+- 必须先调用 clock_set_next_event() 设定下一次时钟事件，再增加 ticks；
+- ticks 每收到一次该中断只能增加一次；
+- 当 ticks 是 TICK_NUM 的整数倍时，调用 print_ticks() 输出一次统计信息；
+- 当 ticks 达到 SHUTDOWN_AFTER * TICK_NUM 时，输出关机提示（例如 `Shutdown after %d ticks`）并调用 sbi_shutdown()；
+- 重新设定下一次时钟事件必须发生在可能耗时或关机的处理之前，减少延迟并保证重装不被跳过；
+- sbi_shutdown() 不返回，因此达到关机条件后不再回到普通返回路径。
 
-严格说，快路径的 TLB 查找不是一条单独的 C 函数，而是 TCG 为每条访存指令生成的代码，x86-64 主机入口是 `tcg/i386/tcg-target.inc.c:1699` 的 `tcg_out_tlb_load`。它生成与 `tlb_hit` 等价的虚拟页标签比较逻辑，`tlb_hit` 本身是 C 侧 helper 的判断，见 `include/exec/cpu-all.h:348-365`；命中就直接用 `CPUTLBEntry.addend` 算主机地址，未命中跳到 helper。
+**Case 2**：tf->cause 去掉最高位后为其他已定义中断原因（用户/监管者/虚拟机/机器模式的软件中断、定时器中断、外部中断）。
+- 输出对应的中断类型提示，例如 Supervisor software interrupt；
+- 不增加 ticks，不调用 clock_set_next_event()，不修改 tf->epc；
+- 处理完成后返回统一 Trap 返回流程。
 
-慢路径的 C 代码是 `accel/tcg/cputlb.c:1501` 的 `store_helper` 和 `:868` 的 `tlb_fill`；RISC-V 的页表遍历回调是 `target/riscv/cpu_helper.c:435` 的 `riscv_cpu_tlb_fill` 和 `:155` 的 `get_physical_address`。`CPUTLBEntry` 的字段是 `addr_read`、`addr_write`、`addr_code`、`addend`（`include/exec/cpu-defs.h:110-129`）；`tlb_set_page_with_attrs()` 第 804 行计算 `tn.addend = addend - vaddr_page`。RISC-V 的流程确实是先查 TLB，TLB miss 后才查页表。
+**Case 3**：tf->cause 去掉最高位后不属于任何已定义中断原因。
+- 按 `Unknown interrupt: cause %d` 的格式输出未知中断原因编号；
+- 调用 print_trapframe(tf) 输出完整 Trap frame，辅助定位问题；
+- 处理完成后返回统一 Trap 返回流程。
 
-#### 4. QEMU TLB 与真实 CPU TLB 的区别
+**Requirements**:
+- 必须清除 scause 的最高位后再匹配 IRQ_* 宏，不能把带符号的负 cause 直接用于分支判断；
+- ticks 每收到一次 IRQ_S_TIMER 必须且只能增加一次，不能在非时钟中断路径增加；
+- 不能只进行 ticks 计数而不重新设定下一次时钟事件，否则系统只能收到一次时钟中断；
+- 达到 SHUTDOWN_AFTER * TICK_NUM 后必须调用框架提供的关机接口，不能只输出信息而继续运行；
+- 中断处理不得推进 tf->epc，也不得修改 trapframe 中与中断处理无关的字段。
 
-| | 真实 CPU | QEMU |
-|---|---|---|
-| 位置 | MMU 硬件内部 | 软件结构 `CPUTLBEntry` |
-| 查找 | 硬件并行比较 | TCG 生成的代码做标签比较 |
-| 填充 | 硬件页表 walker | `get_physical_address` + `tlb_set_page` |
-| 失效 | `sfence.vma` 硬件失效 | QEMU 在 `sfence.vma` 时执行 `tlb_flush` |
-| 条目内容 | VPN→PPN、权限、ASID 等 | `addr_read/write/code` + `addend` |
-| 地址计算 | 硬件组合 | `host_addr = guest_vaddr + addend` |
-| 可见性 | 软件不可见 | 可以在 GDB 里看到 |
+## exception_handler
 
-要点：QEMU 的 TLB 是模拟器实现细节，不是 RISC-V 架构里那个 TLB；它是 TCG 用来加速地址翻译的软件缓存。真实 CPU 的 TLB 是硬件状态，软件只能通过 `sfence.vma` 等指令间接控制；QEMU 的 TLB 是软件数组，GDB 可以直接看到 `CPUTLBEntry`。QEMU 的条目保存 `addend`（主机地址偏移），真实 CPU 保存 VPN→PPN 映射。
+**Pre-Condition**:
+- 由 trap_dispatch() 在 tf->cause 最高位为 0（同步异常）时调用，tf 指向有效的 trapframe；
+- tf->epc 为触发异常的指令地址，且该指令在内存中可读，用于判断指令长度。
 
-官方提示还建议对比未开启虚拟地址空间时的访存路径。源码上 `mode == PRV_M || !riscv_feature(env, RISCV_FEATURE_MMU)` 会直接透传；S 模式下 `satp.MODE=Bare` 也会直接透传。本次实测的是开启 Sv39 后的 S 模式路径，未单独做 Bare/M 模式的 trace；该对比是指南中的可选提示。
+**Post-Condition**:
+- 非法指令异常和断点异常已按实验规定格式输出信息；
+- 两类异常的 tf->epc 已推进到下一条指令的地址；
+- 其他异常已通过 print_trapframe(tf) 输出完整 Trap frame，且 tf->epc 保持不变；
+- 返回后 __trapret 使用更新后的 tf->epc 写回 sepc，sret 不会重复执行已经触发异常的指令。
 
-#### 5. 有趣细节与学到的知识
+**Case 1**：tf->cause == CAUSE_ILLEGAL_INSTRUCTION。
+- 按 `Illegal instruction at 0x%08x` 的格式输出非法指令信息，参数为触发异常的地址 tf->epc；
+- 读取 tf->epc 处指令的前 16 位，若低两位为 0b11，则指令长度为 4 字节；否则为 2 字节；
+- 将 tf->epc 增加实际指令长度，使返回后从下一条指令继续执行。
 
-- **双 GDB 时序**：host GDB 暂停 QEMU 后，guest GDB 的 `si` 可能在等远程回复；`set remotetimeout unlimited` 和 host 侧及时 `continue` 是必需的。`handle SIGPIPE nostop noprint` 则避免 QEMU 的 SIGPIPE 打断调试。
-- **attach 权限**：本机 `ptrace_scope=1`，普通 attach 可能被拒绝；本报告按指导书用 `sudo gdb` attach。另一种方式是让 QEMU 直接作为 host GDB 的子进程运行，不需要 `sudo`。
-- **断点设早了 / 被调试读打断**：无条件 `b get_physical_address` 会先命中 `access_type=0`（`MMU_DATA_LOAD`）的地址翻译；GDB 通过 gdbstub 读 guest 内存（`x/8i`、反汇编）会触发，guest 的普通 load 也是 0，所以不能只看 0 就认定是 GDB。表现为反复 `c` 停不下来。解决是用 `c` 跳过 0，或加 `access_type == 1` 只保留 store；也可以先断 `riscv_cpu_tlb_fill`，它不会命中 GDB 的调试读。
-- **优化级别**：`-O2` 构建的 QEMU 很多局部变量是 `<optimized out>`；另编一个 `-O0 -g` 版本才能稳定看到 `pte`、`ppn` 等。
-- **1GB 大页和 addend**：根 PTE 是 1GB 叶子，所以 3 级循环只跑 1 轮；`get_physical_address` 返回的是页基址，页内偏移由 TLB 的 `addend` 在访存时加回。
-- **工具环境踩坑**：早期还在 QEMU monitor 的 `(qemu)` 提示符下误敲过 `sudo gdb`（截图 `images/09_qemu_monitor_error.png`），以及 `pgrep` 因软链路径匹配不到 QEMU；这些说明先确认“当前在哪一层终端/进程”很重要。
+**Case 2**：tf->cause == CAUSE_BREAKPOINT。
+- 按 `Breakpoint at 0x%08x` 的格式输出断点信息，参数为触发异常的地址 tf->epc；
+- 同样根据指令编码判断长度：c.ebreak 为 2 字节，ebreak 为 4 字节；
+- 将 tf->epc 增加实际指令长度，使返回后从下一条指令继续执行。
 
-#### 6. 大模型交互过程
+**Case 3**：tf->cause 为其他异常原因。
+- 调用 print_trapframe(tf) 输出完整 Trap frame，作为兜底处理；
+- 不修改 tf->epc，不尝试实现实验未要求的异常恢复逻辑；
+- 处理完成后返回统一 Trap 返回流程。
 
-- **定位函数**：问 AI “QEMU 4.1.1 中一次 store 的地址翻译关键路径是什么”，AI 给出 `riscv_cpu_tlb_fill` / `get_physical_address` 等函数；我用 `grep` 和断点核对，确认调用链后才写进报告。
-- **解决 `si` 卡住**：问 AI “guest GDB 的 `si` 一直不返回怎么办”，AI 提示双 GDB 时序和 `set remotetimeout unlimited`；验证后 guest 恢复正常。
-- **解决断点设早**：问 AI “为什么 `get_physical_address` 先停在无关的地址翻译”，AI 指出可能是 `access_type=0` 的调试读或启动阶段访问，建议用 `access_type == 1` 过滤；验证后命中目标 store。
+**Requirements**:
+- 不得对所有异常使用固定的 +4 偏移，必须结合 RISC-V 指令编码判断 16/32 位长度；
+- 必须更新 trapframe 中的 tf->epc，不能只写 sepc 或假定返回时会自动跳过当前指令；
+- 非法指令和断点异常处理后，tf->epc 必须落在下一条合法指令边界，避免再次执行同一条异常指令形成异常循环；
+- 兜底路径不得改变 tf->epc，避免在未实现恢复逻辑时产生错误跳转；
+- 不得修改 tf 中其他寄存器或 CSR 字段。
+````
+
+本模块的 spec 按两个入口分别写：`interrupt_handler` 的 Pre/Post、Case 1（`IRQ_S_TIMER`）、Case 2（其他已定义中断）、Case 3（未知中断）和 Requirements；`exception_handler` 的 Case 1（非法指令）、Case 2（断点）、Case 3（其他异常）和 Requirements。重点约束是：时钟必须重装且 `ticks` 只加一次、异常按指令长度推进 `tf->epc`、未知类型只做 `print_trapframe` 兜底；`[RELY]` 只给 `trapframe`、`IRQ_*`、`CAUSE_*`、`TICK_NUM`、`clock_set_next_event`、`sbi_shutdown` 等真实接口。
+
+prompt 的写法同样是四段式：`[PROMPT]` 说明两个 handler 的任务和返回路径，`[RELY]` 只列 `trapframe`、`IRQ_*`、`CAUSE_*`、`TICK_NUM`、时钟/SBI 接口，`[GUARANTEE]` 固定两个函数签名和可改范围，`[SPECIFICATION]` 按两个入口分别写 Pre/Post/Case/Requirements。
+
+#### 实现迭代过程
+
+本模块共 2 次迭代。
+
+**第一次迭代：** 实现 `interrupt_handler()` / `exception_handler()` 主体，包括中断分类、时钟重装与计数、非法指令/断点输出与 `epc` 推进、未知类型兜底。
+
+**第二次迭代：** 补充 `SHUTDOWN_AFTER` 累计关机逻辑（提交 `fef5f67`），在每次 `print_ticks()` 之后判断 `ticks` 是否达到 `SHUTDOWN_AFTER * TICK_NUM`。
+
+实现中遇到并解决了一个编译问题：
+
+- **`SHUTDOWN_AFTER` 未定义**：第一次生成的代码在时钟分支里使用 `SHUTDOWN_AFTER`，但原始框架没有这个宏，编译报未定义。核对讲义后确认它只被列为“应使用的宏”，需要自己补充；在 `trap.c` 顶部增加 `#define SHUTDOWN_AFTER 10`，并补 `#include <sbi.h>` 以调用 `sbi_shutdown()`，之后编译通过。
+- **报告初稿的测试断言理解偏差**：初稿把“关机”写成 Test 3 的验证点；核对 `grade.sh` 后发现 Test 3 只断言 `100 ticks` 和 `ticks=200`，不检查 `Shutdown after`。报告已改为“关机是练习要求，但不是本次评分点”。
+
+另外确认了三个关键点：
+
+- **最高位**：中断原因必须清除最高位，否则负的 `cause` 匹配不上 `IRQ_*`；
+- **一次性时钟**：时钟事件是一次性的，必须在处理路径中重装；先重装再输出/关机可以减少延迟，并保证重装不被后续路径跳过；
+- **返回地址**：异常处理改的是 `tf->epc`，不是 `sepc`；指令长度也不能一律按 4 字节处理。
+
+**最终结果：**
+
+- ✅ 两个函数编译通过；
+- ✅ `make grade` 三个用例全部通过（100/100）；
+- ✅ 时钟、断点、非法指令路径的输出与 `grade.sh` 的匹配串一致。
 
 ---
 
 ## 五、测试与验证
 
-### 功能模块一：page_init
+本实验使用课程提供的 `make grade` 验证。该目标会先清理构建，把当前源码复制到 `/tmp/lab3_grade`，由 `tools/inject.py` 注入 `tools/test_lab3.*` 并在 `kern_init()` 的相应位置插入测试调用，然后用 QEMU 4.1.1 分别运行三个用例。
 
-在临时副本中注入官方测试并运行，关键结果：
+| 测试 | 验证内容 | 分值 | 结果 |
+|---|---|---|---|
+| Test 1 | Trap 入口、寄存器恢复、断点 EPC | 35 | PASS 35/35 |
+| Test 2 | 非法指令 EPC 推进、handler 兜底 | 25 | PASS 25/25 |
+| Test 3 | 持续时钟中断与反复 Trap 返回 | 40 | PASS 40/40 |
 
-```text
-Physical Memory from DTB:
-  Base: 0x0000000080000000
-  Size: 0x0000000008000000 (128 MB)
-pages = 0xffffffffc0207000, npage = 0x88000, nbase = 0x80000
-check_alloc_page() succeeded!
-[Test 1] Page Init: PASS
-[Test 2] Best-Fit: FAIL (pmm_manager=default_pmm_manager)
-```
-
-`[Test 1]` 的 8 项检查全部通过，说明 page_init 的布局、保留区和页号转换正确。`[Test 2]` 是隔离验证下的预期失败（使用 `default_pmm_manager` + 临时桩），不参与模块一验收。当前整合树已切到 `buddy_pmm_manager`，模块二测试见下。
-
-### 功能模块二
-
-模块二任务二、任务三的测试验证结果如下：
-
-**Best-Fit（模块二任务二）**
-
-`make test` / `make grade` 通过：
-
-![模块二任务二 make test](images/2.2_make_test.png)
-
-![模块二任务二 make grade](images/2.2_make_grade.png)
-
-**Buddy System（模块二任务三）**
-
-`make qemu` 启动后 Buddy 自检通过，截图中可以看到 `[Buddy] Case 1/2/3 PASS` 和 `check_alloc_page() succeeded!`：
-
-![模块二任务三 make qemu](images/2.3_buddy_qemu.png)
-
-### SLUB（选做）
-
-模块与测试编译通过，QEMU 启动后运行 `check_slub()`；功能检查 1-6 和 8 全部 PASS，测试开始与结束时空闲页数均为 `31921`：
+`make qemu` 初始化完成后会输出 `++ setup timer interrupts`，随后每 100 次时钟中断打印一行 `100 ticks`：
 
 ```text
-[SLUB] 10 size classes: 8 16 32 64 128 256 512 1024 2048 4096
-[SLUB Check] start, free pages = 31921
-[SLUB Check] 1. allocation validity & boundary: PASS
-[SLUB Check] 2. non-overlap & alignment: PASS
-[SLUB Check] 3. freed object reuse: PASS
-[SLUB Check] 4. slab growth (640 objects): PASS
-[SLUB Check] 5. slab shrink & no leak: PASS
-[SLUB Check] 6. interleaved alloc/free: PASS
-[SLUB Check] 8. fixed-seed random stress: PASS
-[SLUB Check] check 7 is a panic stage: call check_slub_bad_use(case) separately (panic is expected)
-[SLUB Check] SUMMARY: functional checks 1-6 and 8 PASS, free pages restored to 31921
+++ setup timer interrupts
+100 ticks
+100 ticks
+...
 ```
 
-检查 7 的四个 case 分别单独启动内核，四种非法操作均在对象分配器内部被拦截，按预期 panic，没有发生静默破坏或继续执行：
+![make qemu 运行输出](images/lab3_make_qemu.png)
+
+*图 1：QEMU 4.1.1 下 `make qemu` 的运行输出。*
+
+**Test 1：** `test_lab3_context.S` 先把 t0-t2、s0-s11、a1-a7、t3-t6 设成已知值，再执行 `ebreak`。如果 `RESTORE_ALL` 正确恢复寄存器和 `sp`，并且 `exception_handler` 把 `epc` 推进到 `ebreak` 之后，测试返回 0。实际输出：
 
 ```text
-case 0 (double free):
-kernel panic at kern/mm/slub.c:338:
-    kfree: double free of 0xffffffffc034e000
-
-case 1 (stack address):
-kernel panic at kern/mm/slub.c:319:
-    kfree: pointer 0xffffffffc0206fcc is not in a slab page
-
-case 2 (kfree(NULL)):
-kernel panic at kern/mm/slub.c:311:
-    kfree: NULL is not a kmalloc object
-
-case 3 (non-object boundary):
-kernel panic at kern/mm/slub.c:331:
-    kfree: pointer 0xffffffffc034e001 is not an object boundary (size 64)
+Breakpoint at 0xc0201b40
+[Test 1] Trap entry and breakpoint return: PASS (35/35)
 ```
+
+**Test 2：** 执行 4 字节非法指令 `.word 0x0000007b`，验证 `exception_handler` 打印信息并按指令长度推进 `epc`；随后直接调用 handler，验证软中断、未知中断和未列出异常的兜底分支。实际输出（摘录）：
+
+```text
+Illegal instruction at 0xc0201af0
+Supervisor software interrupt
+Unknown interrupt: cause 15
+...（省略两次 print_trapframe 的寄存器输出）
+cause    0x00000014
+[Test 2] Illegal instruction return: PASS (25/25)
+```
+
+其中 `Supervisor software interrupt`、`Unknown interrupt: cause 15`、`cause    0x00000014` 三行来自 `test_lab3_handler_fallbacks()`：它在栈上构造 `trapframe`，直接调用两个 handler 验证兜底分支，不是真实硬件 trap 现场；真实硬件路径由前面的非法指令触发。
+
+**Test 3：** 在 `clock_init()` 之后检查 `ticks` 从 0 开始；在 `intr_enable()` 之后自旋到 `ticks >= 200`，验证时钟中断能被持续重装、反复返回。实际输出：
+
+```text
+100 ticks
+...
+[Test 3] Sustained supervisor timer: PASS (40/40, ticks=200)
+```
+
+运行中还可以观察到 `Shutdown after 1000 ticks`。关机是练习要求的行为；`grade.sh` 的 Test 3 只断言 `100 ticks` 和 `ticks=200`（以及 PASS 哨兵），不检查 `Shutdown after`，所以它不是本次评分点。
+
+总结果：
+
+```text
+Total Score: 100/100
+```
+
+![make grade 100/100](images/lab3_make_grade.png)
+
+*图 2：`make grade` 的最终结果：Test 3 PASS，Total Score 100/100（总分表明三个用例均通过）。*
+
+三个用例的超时分别为 8s、8s、30s；`make grade` 会先在工作区执行 `make clean`，再把源码复制到 `/tmp/lab3_grade` 运行，不修改源码。以上为 QEMU 4.1.1 下 `make grade` 的真实终端输出摘录。
 
 ---
 
@@ -1007,30 +467,34 @@ kernel panic at kern/mm/slub.c:331:
 
 ### 对操作系统的理解
 
-- 物理内存管理本质上是记录和分配：每个物理页对应一个描述符，内核必须清楚哪些页被固件、内核、描述符自身占用，哪些页可以分配。
-- 地址转换不是“一个函数”，而是一条有分支的路径：虚拟地址先查 TLB，命中直接得到映射；未命中才遍历页表。QEMU 用软件 TLB/页表遍历模拟这一过程，双 GDB 让慢路径可见。
-- 机制与策略分离很重要：`pmm_manager` 只定义页级分配接口，First-Fit/Best-Fit/Buddy 是它的不同实现；SLUB 是建立在页分配器之上的对象分配器。`page_init` 确定可用页范围并通过 `pmm_manager->init_memmap` 注册，不实现具体分配算法。
-
-
+- **Trap 是硬件与内核的分界线**：硬件在 trap 发生时自动保存 PC、写入 `scause`、跳到 `stvec`；软件负责解释原因、处理事件、恢复现场。理解这条分界线，才能分清哪些事必须由硬件做、哪些事由内核做。
+- **上下文恢复的核心是“布局一致”**：`SAVE_ALL`、`struct trapframe`、`RESTORE_ALL`、RISC-V 调用约定四者必须严格对应；任何一处假设了不同的槽位或寄存器顺序，都会在返回时表现为“寄存器错乱”或“原地死循环”。
+- **机制与策略分离**：入口/恢复是通用机制，`trap_dispatch()` 只按 cause 分流，具体处理由 `interrupt_handler()` / `exception_handler()` 完成。新增一种中断或异常，只需要在策略层增加分支，不必改入口。
 
 #### 本实验重要知识点及对应 OS 原理
 
-| 本实验知识点 | 对应 OS 原理 | 含义/关系/差异 |
+| 本实验知识点 | 对应 OS 原理 | 含义、关系与差异 |
 |---|---|---|
-| DTB / OpenSBI 报告物理内存 | 固件/引导协议与 OS 的内存发现 | 实验中由 QEMU+OpenSBI 通过 DTB 提供；真实机器可能用 UEFI/ACPI/BIOS e820。共同点是“OS 不盲目扫描，由更早启动的软件提供可信描述”。 |
-| `struct Page` 描述符、`pages` 数组 | 物理页帧管理（page frame database） | 实验用连续数组描述每个物理页；真实 OS 也常用 `struct page`/`mem_map`，但会考虑 NUMA、内存空洞、热插拔等。 |
-| 页级分配：First-Fit / Best-Fit / Buddy | 物理页分配算法与碎片 | 本实验实现三种算法；最终整合树的 `pmm_manager` 是 Buddy。真实 OS 中 Buddy 管理页级分配，碎片类型与对象分配不同。 |
-| 对象级分配：SLUB / Slab | 对象分配器与缓存 | SLUB 建立在页分配器之上，是两层结构：整页切分成固定大小对象，用 freelist 管理。真实 OS 用 per-CPU 缓存降低锁竞争。 |
-| SV39 页表、`satp`、VPN/PPN、TLB | 虚拟内存、分页、MMU/TLB | 实验用启动页表把内核映射到高地址，QEMU 用软件 TLB 加速翻译；真实 OS 为每个进程维护页表，切换时写 `satp`（含 ASID），MMU 用 ASID 区分 TLB 条目，OS 负责 ASID 分配和 `sfence.vma` 失效。本实验只用启动页表的 1GB 大页，没有进程页表/ASID 切换。 |
-| `PADDR`、`page2pa`、`pa2page` | 虚拟地址/物理地址/页号转换 | 实验用固定偏移和数组下标；真实 OS 还要处理高端内存、直接映射区、vmalloc 等。 |
-| 双 GDB 调试 QEMU/内核 | 调试与可观测性 | 实验用 QEMU gdbstub + host GDB；真实 OS 常用 kgdb、ftrace、perf、eBPF 等。 |
+| trap / 中断 / 异常 | 中断与异常处理 | 中断是异步的，异常是当前指令同步触发的；trap 是二者的统一入口。本实验用同一个 `__alltraps` 处理两类事件。 |
+| trapframe / 上下文保存恢复 | 进程上下文切换 | 本实验把寄存器保存到内核栈上的 `trapframe`；真正的进程切换还要切换页表、内核栈、PCB 等，范围更大。 |
+| CSR / `stvec` / `sret` | 特权级与模式切换 | CSR 是 CPU 的控制/状态寄存器；`stvec` 决定 trap 入口，`sret` 按 `sepc` 和 `sstatus` 返回。OS 原理中对应“用户态/内核态切换”。 |
+| 时钟中断 / `ticks` | 时钟与时间管理 | 本实验用 SBI 的一次性定时器 + 每次中断重装来模拟周期时钟；OS 原理中的时钟还负责时间片、超时和调度。 |
+| `local_intr_save/restore` | 临界区 / 互斥 | 讲义介绍了这套接口；本实验的 trap 代码没有直接使用，临界区保护主要出现在物理内存分配路径。多核场景还需要自旋锁等机制。 |
+| `epc` 指令长度 | 异常返回 / 指令集 | RISC-V 指令长度可变（16/32 位）；异常返回必须按实际长度跳过出错指令，否则会重复触发。 |
 
+#### OS 原理中重要但本实验没有对应的知识点
 
+- **进程/线程调度与真正的上下文切换**：本实验是内核态自陷，没有进程切换和调度器。
+- **用户态与系统调用**：本实验没有 U 模式；`ecall` 只用于 S 模式向 OpenSBI 请求服务，不是用户态系统调用。
+- **缺页异常与按需分页**：lab2 建立了页表，但 lab3 没有处理缺页异常和页面置换。
+- **多核同步与锁**：本实验是单核，关中断只影响当前 hart；多核共享数据需要锁和内存屏障。
+- **文件系统、设备驱动、进程间通信**：本实验只覆盖 trap 机制本身。
+- **Trap 委托（`medeleg/mideleg`）**：由 OpenSBI 在启动时配置，本实验未实现委托设置。
 
 ### AI 协作开发的经验
 
-- Prompt 要写“需求规格”，不要写“逐步实现”；`[PROMPT]/[RELY]/[GUARANTEE]/[SPECIFICATION]` 四段式能让 AI 的输出可验证。
-- `[RELY]` 要最小且可信：只给相关宏、结构体、函数、全局变量，并从代码复制，避免 AI 臆造名字。
-- 每条要求都要能对应测试/断言/状态检查；否则 AI 很容易“看起来实现了”，但边界没处理。
-- AI 可以帮助定位源码、解释报错、设计条件断点，但最终必须自己用 GDB/测试验证；不能把“AI 说对了”当成验证。
-- 环境问题（QEMU 版本、ptrace、SIGPIPE、优化级别、tmux）会伪装成“代码 bug”；先确认环境，再怀疑代码。
+- **先把 spec 写成契约**：写清输入、输出、约束和边界，而不是指令序列；AI 可以自由选择实现，但必须满足可验证的条件。
+- **用四段式提示词**：`[PROMPT]` 任务、`[RELY]` 最小可信上下文、`[GUARANTEE]` 接口、`[SPECIFICATION]` 行为规格。`[RELY]` 只给真实存在的接口，避免 AI 猜测。
+- **用真实测试收口**：`make grade` 的三个用例比“AI 说对了”可靠；Test 1 还反向验证了 `sepc` 恢复——如果 `RESTORE_ALL` 没恢复 `sepc`，`ebreak` 会反复执行，测试不可能通过。
+
+
