@@ -1,9 +1,5 @@
 # Lab3 Prompt 汇总
 
-> 本文件收集 lab3 各模块实际使用的提示词/问题，供报告和提交使用。
-
----
-
 ## 一、功能模块一：Trap 上下文恢复与入口【李行阳】
 
 ### 1.1 完整 prompt（四段式）
@@ -39,67 +35,38 @@ __alltraps:
 - Requirements：参数按 RISC-V ABI 放在 a0；不得破坏恢复所需的信息。
 ```
 
-### 1.2 设计说明
-
-- spec 写“做什么、什么不能动”，不写具体指令序列；AI 据此自行选择 `sp` 最后恢复、用 `s1~s4` 暂存 CSR 等实现。
-- `[RELY]` 只给 `struct trapframe`、`SAVE_ALL`、`REGBYTES`、`trap()` 签名等最小可信信息，避免 AI 猜布局。
-- 用 Test 1 验证：它同时覆盖寄存器恢复和 `sepc` 更新。
-
 ---
 
 ## 二、功能模块二：中断与异常处理【邵毅、王治中】
 
 ### 2.1 完整 prompt（四段式）
 
-````text
+~~~text
 [PROMPT]
 **任务**：修改 code/kern/trap/trap.c，实现 lab3 功能模块二“中断与异常处理”，完成 interrupt_handler() 和 exception_handler() 两个函数。interrupt_handler() 负责对 Trap 入口送来的中断按原因分类处理；exception_handler() 负责对同步异常分类处理。两个函数处理结束后都必须返回到 trap_dispatch()/trap()，由已有的 Trap 返回流程恢复现场并执行 sret。
 
-**操作要求**：必须实际修改项目文件，不要只展示代码。保留 trap.c 中已有代码和注释，只在标有 `//lab3 function2` 的位置补全两个函数；如需 `SHUTDOWN_AFTER`，可在 trap.c 顶部新增宏定义。不得修改两个函数的签名，不得修改 trap.c 中规定以外的其他函数（包括 trap_dispatch()、trap()、print_trapframe()、print_regs()、print_ticks()、idt_init()、trap_in_kernel() 等），不得改动 trapentry.S、trap.h 中的现有接口和数据结构。如需辅助函数，应声明为 static，仅供本模块内部使用。
+**操作要求**：必须实际修改项目文件，不要只展示代码。保留 trap.c 中已有代码和注释，只在标有 `//lab3 function2` 的位置补全两个函数；累计输出达到 SHUTDOWN_AFTER 后需要调用框架提供的关机接口，`SHUTDOWN_AFTER`在 trap.c 顶部新增宏定义。不得修改两个函数的签名，不得修改 trap.c 中规定以外的其他函数（包括 trap_dispatch()、trap()、print_trapframe()、print_regs()、print_ticks()、idt_init()、trap_in_kernel() 等），不得改动 trapentry.S、trap.h 中的现有接口和数据结构。如需辅助函数，应声明为 static，仅供本模块内部使用。
 
 **输出要求**：直接进行文件操作；实现必须使用下面 [RELY] 中列出的、工程中真实存在的宏、结构体、全局变量和函数，不要引入无关功能或自造接口。
 
 [RELY]
-// 结构体（code/kern/trap/trap.h）
-struct trapframe {
-    struct pushregs gpr;
-    uintptr_t status;
-    uintptr_t epc;       // 触发 Trap 的指令地址
-    uintptr_t badvaddr;
-    uintptr_t cause;     // scause
-};
-// tf->cause 最高位为 1 表示中断，为 0 表示同步异常。
-// trap_dispatch() 已按 (intptr_t)tf->cause < 0 分流：
-// 中断进入 interrupt_handler()，异常进入 exception_handler()。
+// 结构体与分流（code/kern/trap/trap.h、trap.c）
+// struct trapframe （含 gpr、status、epc、badvaddr、cause 字段）；
+// tf->cause 最高位为 1 表示中断、为 0 表示同步异常，trap_dispatch() 已按此分流到两个处理函数。
 
-// 中断原因（code/libs/riscv.h）
-IRQ_U_SOFT=0，IRQ_S_SOFT=1，IRQ_H_SOFT=2，IRQ_M_SOFT=3，
-IRQ_U_TIMER=4，IRQ_S_TIMER=5，IRQ_H_TIMER=6，IRQ_M_TIMER=7，
-IRQ_U_EXT=8，IRQ_S_EXT=9，IRQ_H_EXT=10，IRQ_M_EXT=11。
+// 中断原因（code/libs/riscv.h）：IRQ_* 宏共 12 个（IRQ_U_SOFT=0 ~ IRQ_M_EXT=11），需特判 IRQ_S_TIMER=5。
+// 异常原因（code/libs/riscv.h）：CAUSE_ILLEGAL_INSTRUCTION=0x2、CAUSE_BREAKPOINT=0x3。
 
-// 异常原因（code/libs/riscv.h）
-CAUSE_ILLEGAL_INSTRUCTION=0x2，CAUSE_BREAKPOINT=0x3。
+// 时钟与统计：TICK_NUM=100（已有）、SHUTDOWN_AFTER 需新增、extern volatile size_t ticks（时钟中断计数）；
+// void print_ticks(void)：输出一次统计信息；
+// void clock_set_next_event(void)：设定下一次时钟事件，不调用则只能收到一次时钟中断（clock.h）；
+// void sbi_shutdown(void)：关机，不返回（sbi.h）。
 
-// 时钟与统计（code/kern/trap/trap.c、code/kern/driver/clock.h）
-TICK_NUM=100（已有）；SHUTDOWN_AFTER 需新增（本实现取 10）； 
-extern volatile size_t ticks;
-static void print_ticks(void);        // 已有，输出 "%d ticks\n"（TICK_NUM）
-void clock_set_next_event(void);      // 通过 SBI 设定下一次时钟事件；必须调用才能持续收到时钟中断
-void sbi_shutdown(void);              // code/libs/sbi.h，关机后不返回
+// 输出与调试（已有）：int cprintf(const char *fmt, ...)、void print_trapframe(struct trapframe *tf)（打印完整 Trap frame）。
 
-// 输出与调试
-void print_trapframe(struct trapframe *tf);  // 已有，打印完整 Trap frame
-int cprintf(const char *fmt, ...);           // 已有
-
-// Trap 返回机制
-// trapentry.S 的 RESTORE_ALL 会把 tf->status、tf->epc、tf->badvaddr、tf->cause
-// 写回对应 CSR，然后执行 sret。因此异常处理应更新 trapframe 中的 tf->epc，
-// 不能直接写 sepc 后假定返回流程会跳过当前指令。
-
-// RISC-V 指令长度
-// 16 位压缩指令：指令低两位 != 0b11；
-// 32 位指令：指令低两位 == 0b11。
-// ebreak 为 32 位，c.ebreak 为 16 位。
+// Trap 返回与指令长度：RESTORE_ALL 会把 tf->epc 等写回对应 CSR 后执行 sret，
+// 因此改变返回地址应修改 tf->epc，不能直接写 sepc；
+// 指令低两位为 0b11 时长度为 4 字节，否则为 2 字节（ebreak 4 字节，c.ebreak 2 字节）。
 
 [GUARANTEE]
 必须实现或修改的接口：
@@ -118,79 +85,31 @@ void exception_handler(struct trapframe *tf);
 ## interrupt_handler
 
 **Pre-Condition**:
-- 由 trap_dispatch() 在 tf->cause 最高位为 1（中断）时调用，tf 指向有效的 trapframe；
-- Trap 入口已保存现场，处理函数返回后由统一的 Trap 返回流程恢复现场并执行 sret。
+- 由 trap_dispatch() 在 tf->cause 为中断（最高位为 1）时调用，tf 指向有效的 trapframe；返回后由统一的 Trap 返回流程恢复现场并执行 sret。
 
 **Post-Condition**:
-- 按 tf->cause 去掉最高位后的中断原因完成对应处理，函数返回后 trap() 能正常返回；
-- 每收到一次 Supervisor 时钟中断，ticks 恰好增加 1，并且下一次时钟事件已被重新设定；
-- 非时钟中断不改变 ticks、不重新设定时钟事件、不推进 tf->epc；
-- 无法识别的中断已输出完整 Trap frame 供调试。
+- 按去掉最高位后的中断原因完成对应处理并正常返回；每次时钟中断 ticks 恰好加 1，且下一次时钟事件已被重新设定；其他中断不改变 ticks、不重设时钟事件、不推进 tf->epc。
 
-**Case 1**：tf->cause 去掉最高位后为 IRQ_S_TIMER。
-- 必须先调用 clock_set_next_event() 设定下一次时钟事件，再增加 ticks；
-- ticks 每收到一次该中断只能增加一次；
-- 当 ticks 是 TICK_NUM 的整数倍时，调用 print_ticks() 输出一次统计信息；
-- 当 ticks 达到 SHUTDOWN_AFTER * TICK_NUM 时，输出关机提示（例如 `Shutdown after %d ticks`）并调用 sbi_shutdown()；
-- 重新设定下一次时钟事件必须发生在可能耗时或关机的处理之前，减少延迟并保证重装不被跳过；
-- sbi_shutdown() 不返回，因此达到关机条件后不再回到普通返回路径。
+**Case 1**：去掉最高位后为 IRQ_S_TIMER。
+- 先重新设定下一次时钟事件，再将 ticks 加 1；ticks 为 TICK_NUM 整数倍时输出一次统计信息；达到 SHUTDOWN_AFTER * TICK_NUM 时输出关机提示并关机（关机后不返回）。
 
-**Case 2**：tf->cause 去掉最高位后为其他已定义中断原因（用户/监管者/虚拟机/机器模式的软件中断、定时器中断、外部中断）。
-- 输出对应的中断类型提示，例如 Supervisor software interrupt；
-- 不增加 ticks，不调用 clock_set_next_event()，不修改 tf->epc；
-- 处理完成后返回统一 Trap 返回流程。
-
-**Case 3**：tf->cause 去掉最高位后不属于任何已定义中断原因。
-- 按 `Unknown interrupt: cause %d` 的格式输出未知中断原因编号；
-- 调用 print_trapframe(tf) 输出完整 Trap frame，辅助定位问题；
-- 处理完成后返回统一 Trap 返回流程。
+**Case 2**：其他中断。
+- 已定义的中断输出对应的中断类型提示；无法识别的按 `Unknown interrupt: cause %d` 的格式输出原因编号，并打印完整 Trap frame 辅助调试。
 
 **Requirements**:
-- 必须清除 scause 的最高位后再匹配 IRQ_* 宏，不能把带符号的负 cause 直接用于分支判断；
-- ticks 每收到一次 IRQ_S_TIMER 必须且只能增加一次，不能在非时钟中断路径增加；
-- 不能只进行 ticks 计数而不重新设定下一次时钟事件，否则系统只能收到一次时钟中断；
-- 达到 SHUTDOWN_AFTER * TICK_NUM 后必须调用框架提供的关机接口，不能只输出信息而继续运行；
-- 中断处理不得推进 tf->epc，也不得修改 trapframe 中与中断处理无关的字段。
+- 匹配 IRQ_* 宏前必须清除 cause 的最高位，不能把带符号的负 cause 直接用于分支；不修改 trapframe 中与中断处理无关的字段。
 
 ## exception_handler
 
 **Pre-Condition**:
-- 由 trap_dispatch() 在 tf->cause 最高位为 0（同步异常）时调用，tf 指向有效的 trapframe；
-- tf->epc 为触发异常的指令地址，且该指令在内存中可读，用于判断指令长度。
+- 由 trap_dispatch() 在 tf->cause 为同步异常（最高位为 0）时调用；tf->epc 为触发异常的指令地址，且该指令在内存中可读。
 
 **Post-Condition**:
-- 非法指令异常和断点异常已按实验规定格式输出信息；
-- 两类异常的 tf->epc 已推进到下一条指令的地址；
-- 其他异常已通过 print_trapframe(tf) 输出完整 Trap frame，且 tf->epc 保持不变；
-- 返回后 __trapret 使用更新后的 tf->epc 写回 sepc，sret 不会重复执行已经触发异常的指令。
+- 非法指令和断点异常已按实验规定格式输出，且 tf->epc 已推进到下一条指令地址（必须结合指令编码判断长度，不得固定 +4）；其他异常已打印完整 Trap frame，且 tf->epc 保持不变；返回后不会重复执行触发异常的指令。
 
-**Case 1**：tf->cause == CAUSE_ILLEGAL_INSTRUCTION。
-- 按 `Illegal instruction at 0x%08x` 的格式输出非法指令信息，参数为触发异常的地址 tf->epc；
-- 读取 tf->epc 处指令的前 16 位，若低两位为 0b11，则指令长度为 4 字节；否则为 2 字节；
-- 将 tf->epc 增加实际指令长度，使返回后从下一条指令继续执行。
+**Case 1**：CAUSE_ILLEGAL_INSTRUCTION 或 CAUSE_BREAKPOINT。
+- 分别按 `Illegal instruction at 0x%08x` / `Breakpoint at 0x%08x` 的格式输出（参数为 tf->epc），按指令编码判断实际长度（c.ebreak 2 字节、ebreak 4 字节）并推进 tf->epc。
 
-**Case 2**：tf->cause == CAUSE_BREAKPOINT。
-- 按 `Breakpoint at 0x%08x` 的格式输出断点信息，参数为触发异常的地址 tf->epc；
-- 同样根据指令编码判断长度：c.ebreak 为 2 字节，ebreak 为 4 字节；
-- 将 tf->epc 增加实际指令长度，使返回后从下一条指令继续执行。
-
-**Case 3**：tf->cause 为其他异常原因。
-- 调用 print_trapframe(tf) 输出完整 Trap frame，作为兜底处理；
-- 不修改 tf->epc，不尝试实现实验未要求的异常恢复逻辑；
-- 处理完成后返回统一 Trap 返回流程。
-
-**Requirements**:
-- 不得对所有异常使用固定的 +4 偏移，必须结合 RISC-V 指令编码判断 16/32 位长度；
-- 必须更新 trapframe 中的 tf->epc，不能只写 sepc 或假定返回时会自动跳过当前指令；
-- 非法指令和断点异常处理后，tf->epc 必须落在下一条合法指令边界，避免再次执行同一条异常指令形成异常循环；
-- 兜底路径不得改变 tf->epc，避免在未实现恢复逻辑时产生错误跳转；
-- 不得修改 tf 中其他寄存器或 CSR 字段。
-````
-
-### 2.2 设计说明
-
-- 中断处理必须先清 `scause` 最高位，再匹配 `IRQ_*`；时钟事件是一次性的，每次 `IRQ_S_TIMER` 都要重装。
-- 异常处理改的是 `tf->epc`，不是 `sepc`；指令长度按低两位判断 2/4 字节，不能固定 +4。
-- spec 按两个入口分别写 Pre/Post、Case 1/2/3 和 Requirements；重点约束时钟重装、`ticks` 只加一次、`epc` 按指令长度推进、未知类型用 `print_trapframe` 兜底。
-- `SHUTDOWN_AFTER` 不是框架自带宏，本次实现新增（`#define SHUTDOWN_AFTER 10`）；prompt 的 `[RELY]` 已注明。
-- 输出格式以 `tools/grade.sh` 的匹配串为准；指导书只写“规定格式”。
+**Case 2**：其他异常原因。
+- 打印完整 Trap frame 兜底；不修改 tf->epc 及其他字段，不实现实验未要求的恢复逻辑。
+~~~
