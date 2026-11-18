@@ -276,9 +276,64 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
 
 //LAB4 function1 YOUR CODE
 
+// page_insert - map the physical page 'page' at linear address 'la'
+// param pgdir: the kernel virtual base address of PDT
+// param page:  the struct Page of the physical page to be mapped
+// param la:    the linear address need to map
+// param perm:  the permission of this page
+// return value: 0 if succeed, -E_NO_MEM if get_pte failed to allocate
+//               the intermediate page table page
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
+{
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL)
+    {
+        return -E_NO_MEM;
+    }
+    // increase the ref count first, so that page_remove below will not
+    // free 'page' itself when la is already mapped to it
+    page_ref_inc(page);
+    if (*ptep & PTE_V)
+    {
+        struct Page *p = pte2page(*ptep);
+        if (p != page)
+        {
+            // la is mapped to another physical page, revoke the old mapping
+            // (the old page's ref count decreases, free it if reaches 0)
+            page_remove(pgdir, la);
+        }
+        else
+        {
+            // la is already mapped to the same page, keep ref count unchanged
+            page_ref_dec(page);
+        }
+    }
+    // setup the pte with PTE_V|perm, keep pte content, ref count and TLB sync
+    *ptep = pte_create(page2ppn(page), PTE_V | perm);
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
 
-
-
+// page_remove - unmap the linear address la, free the page if its ref count
+//               reaches 0
+// param pgdir: the kernel virtual base address of PDT
+// param la:    the linear address need to be unmapped
+// note: it is an idempotent interface, quietly return if la is not mapped
+void page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep != NULL && (*ptep & PTE_V))
+    {
+        struct Page *page = pte2page(*ptep);
+        page_ref_dec(page);
+        if (page_ref(page) == 0)
+        {
+            free_page(page);
+        }
+        *ptep = 0;
+        tlb_invalidate(pgdir, la);
+    }
+}
 
 
 
