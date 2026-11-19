@@ -218,7 +218,7 @@ init_main(void *arg)
     return 0;
 }
 
-//LAB4 function2 YOUR CODE
+//lab4 function2 2412195
 
 // alloc_proc - alloc a proc_struct and init all fields of proc_struct
 static struct proc_struct *
@@ -404,4 +404,42 @@ proc_init(void)
 }
 
 
-//LAB4 function3 YOUR CODE
+//lab4 function3 2411353
+// proc_run - make process "proc" running on cpu
+//            save the current context, switch to the new page table and
+//            restore the new process's context
+void
+proc_run(struct proc_struct *proc)
+{
+    if (proc != current)
+    {
+        bool intr_flag;
+        struct proc_struct *prev = current, *next = proc;
+        local_intr_save(intr_flag);
+        {
+            current = proc;
+            // switch to the new process's address space (Sv39):
+            // satp = MODE(8) | PPN of the page table root
+            write_csr(satp, ((uintptr_t)SATP_MODE_SV39 << 60) |
+                                (next->pgdir >> RISCV_PGSHIFT));
+            flush_tlb();
+            switch_to(&(prev->context), &(next->context));
+        }
+        local_intr_restore(intr_flag);
+    }
+}
+
+//lab4 function3 2411353
+// cpu_idle - the body of the idle thread: keep yielding the CPU whenever
+//            some process asks for a reschedule
+void
+cpu_idle(void)
+{
+    while (1)
+    {
+        if (current->need_resched)
+        {
+            schedule();
+        }
+    }
+}
